@@ -1,0 +1,20 @@
+# Build artifacts
+/build/
+/target/
+*.o
+*.a
+*.so
+*.d
+*.elf
+*.bin
+*.img
+*.iso
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Tooling
+.cache/
