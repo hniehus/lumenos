@@ -27,9 +27,18 @@ Out of scope for M1:
 
 ## Quick start (Ubuntu)
 ### Requirements
-This repo expects a Linux host (Ubuntu recommended) with QEMU, OVMF, LLVM/Clang, NASM, and Rust.
+This repo expects a Linux host (Ubuntu 22.04+ recommended) with Docker or manually installed LLVM/Clang, NASM, and optional Rust.
 
-If you used the bootstrap script, most dependencies are already installed.
+**For reproducible builds, use Docker** (see [BUILD.md](BUILD.md)):
+```bash
+docker build -f Dockerfile -t lumenos-build .
+docker run --rm -v $(pwd):/workspace lumenos-build make build
+```
+
+Alternatively, install toolchain manually:
+```bash
+bash scripts/install-toolchain.sh --ubuntu
+```
 
 ### Build (placeholder)
 For now, this is a scaffold. The build system will live in `tools/build/` and top-level `Makefile`.
@@ -38,6 +47,8 @@ Typical goals will look like:
 - `make build`
 - `make run`
 - `make debug`
+
+**📖 See [BUILD.md](BUILD.md) for quick setup and [docs/dev/TOOLCHAIN.md](docs/dev/TOOLCHAIN.md) for full details.**
 
 ## Contributing
 See `CONTRIBUTING.md` (or `Contribution.md`) for guidelines.

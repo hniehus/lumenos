@@ -22,8 +22,34 @@
   - `rustfmt` clean
   - No `unsafe` unless justified in comments and kept minimal
 - Formatting:
-  - C: `clang-format`
+  - C: `clang-format` (via pinned Clang 18.1.8)
   - Shell: `shellcheck`
+
+## Build environment & toolchain
+
+**The toolchain is pinned for reproducibility.** All developers and CI use identical versions (LLVM 18.1.8, NASM 2.15.05, etc.).
+
+**Setup (pick one):**
+
+1. **Docker** (recommended for reproducibility):
+   ```bash
+   docker build -f Dockerfile -t lumenos-build .
+   docker run --rm -v $(pwd):/workspace lumenos-build make build
+   ```
+
+2. **VS Code Dev Container** (easiest if you use VS Code):
+   - Install **Dev Containers** extension
+   - Reopen project in Container (Command Palette)
+   - Done!
+
+3. **Manual install** (host machine):
+   ```bash
+   bash scripts/install-toolchain.sh --ubuntu
+   source .toolchain.env
+   make build
+   ```
+
+**📖 Details:** See [BUILD.md](BUILD.md) and [docs/dev/TOOLCHAIN.md](docs/dev/TOOLCHAIN.md).
 
 ## Testing expectations
 At minimum, changes should:
@@ -34,8 +60,10 @@ At minimum, changes should:
 ## Reporting issues
 When filing an issue, include:
 - Host OS + versions (Ubuntu version, QEMU version)
+- How you built: Docker / Dev Container / Manual install
+- Toolchain version: run `clang-18 --version && ld.lld-18 --version`
 - Repro steps
-- Serial log output
+- Serial log output or error message
 
 ## Security
 If you find a security issue, do not post exploit details publicly. Create a private report (process TBD).
@@ -154,7 +182,8 @@ git checkout main
 git pull --rebase origin main
 git checkout -b spike/uefi-loader
 # experiment...
-git add -A  git commit -m "spike: uefi loader prototype + notes"
+git add -A
+git commit -m "spike: uefi loader prototype + notes"
 git push -u origin spike/uefi-loader
 ```
 PR should clearly state whether it’s meant to merge or just document results.
@@ -163,10 +192,13 @@ PR should clearly state whether it’s meant to merge or just document results.
 
 Format:
 
-*   area: summaryExamples:
+*   area: summary
+
+Examples:
 *   kernel: add preemptive timer tick
 *   mm: implement buddy allocator
-*   build: add clang+lld toolchain support
+*   build: update LLVM to 19.0.0 (include reason if toolchain version change)
+*   ci: add integration test for bootable image
 *   docs: document boot flow
 
 ## PR rules (non-negotiable)

@@ -1,0 +1,53 @@
+{
+  "name": "LumenOS Dev",
+  "image": "lumenos-build:latest",
+  "build": {
+    "dockerfile": "../Dockerfile"
+  },
+  "remoteUser": "root",
+  "mounts": [
+    "source=${localEnv:HOME}/.cargo,target=/root/.cargo,type=bind"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cpptools",
+        "rust-lang.rust-analyzer",
+        "ms-vscode.makefile-tools",
+        "ms-vscode-remote.remote-containers"
+      ],
+      "settings": {
+        "C_Cpp.default.compilerPath": "/usr/bin/clang-18",
+        "C_Cpp.default.cppStandard": "c23",
+        "C_Cpp.default.cStandard": "c23",
+        "clangd.arguments": [
+          "--query-driver=/usr/bin/clang-18"
+        ]
+      }
+    }
+  },
+  "forwardPorts": [
+    1234,
+    5555
+  ],
+  "portsAttributes": {
+    "1234": {
+      "label": "GDB",
+      "onAutoForward": "notify"
+    },
+    "5555": {
+      "label": "Serial",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "make --version && clang-18 --version && ld.lld-18 --version",
+  "remoteEnv": {
+    "CC": "clang-18",
+    "CXX": "clang++-18",
+    "LD": "ld.lld-18",
+    "AR": "llvm-ar-18",
+    "OBJCOPY": "llvm-objcopy-18",
+    "OBJDUMP": "llvm-objdump-18"
+  }
+}

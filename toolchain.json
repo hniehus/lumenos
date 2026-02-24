@@ -1,0 +1,87 @@
+{
+  "version": "1.0",
+  "description": "LumenOS compiler toolchain version pinning. Source of truth for reproducible builds.",
+  "primary": {
+    "name": "LLVM/Clang + LLD",
+    "rationale": "Modern, actively maintained, excellent Rust support, consistent across platforms, good x86-64 support."
+  },
+  "versions": {
+    "llvm": {
+      "version": "18",
+      "version_full": "18.1.8",
+      "release_date": "2024-03-05",
+      "reason": "Latest stable with mature C23/C++23 support and stable LTO"
+    },
+    "clang": {
+      "version": "18",
+      "version_full": "18.1.8",
+      "reason": "Part of LLVM 18 release"
+    },
+    "lld": {
+      "version": "18",
+      "version_full": "18.1.8",
+      "reason": "LLVM linker, part of LLVM 18 release"
+    },
+    "llvm-objcopy": {
+      "version": "18.1.8",
+      "reason": "For ELF manipulation"
+    },
+    "llvm-objdump": {
+      "version": "18.1.8",
+      "reason": "For binary analysis and debugging"
+    },
+    "llvm-ar": {
+      "version": "18.1.8",
+      "reason": "Archive creation (replaces ar)"
+    },
+    "nasm": {
+      "version": "2.15.05",
+      "release_date": "2021-01-06",
+      "reason": "Assembler for x86-64 boot code and critical sections"
+    },
+    "make": {
+      "version": "4.4",
+      "min_version": "4.3",
+      "reason": "Build system orchestration"
+    },
+    "rust": {
+      "version": "1.75.0",
+      "min_version": "1.70.0",
+      "reason": "Userspace utilities and potential future kernel components. Toolchain: x86_64-unknown-linux-gnu"
+    },
+    "qemu": {
+      "version": "8.2.0",
+      "min_version": "8.0.0",
+      "reason": "System emulation for testing. Needs: qemu-system-x86_64"
+    },
+    "ovmf": {
+      "version": "edk2-stable202311",
+      "min_version": "edk2-stable202301",
+      "reason": "UEFI firmware for QEMU x86_64"
+    },
+    "gdb": {
+      "version": "14.1",
+      "min_version": "13.0",
+      "reason": "Debugging kernel via QEMU. Optional but recommended."
+    }
+  },
+  "host": {
+    "os": ["Linux"],
+    "architectures": ["x86_64"],
+    "recommended_distros": ["Ubuntu 22.04 LTS", "Ubuntu 24.04 LTS", "Debian 12"]
+  },
+  "environment": {
+    "CC": "clang-18",
+    "CXX": "clang++-18",
+    "LD": "ld.lld-18",
+    "AR": "llvm-ar-18",
+    "OBJCOPY": "llvm-objcopy-18",
+    "OBJDUMP": "llvm-objdump-18"
+  },
+  "update_frequency": "Quarterly (or when critical fixes are needed)",
+  "policy": {
+    "major_updates": "Coordinated across main + feature branches",
+    "lts_support": "Maintain N and N-1 major versions if needed",
+    "breaking_changes": "Documented in CHANGELOG.md before merge to main"
+  }
+}
