@@ -155,7 +155,7 @@ git pull --rebase origin main
 git checkout -b spike/uefi-loader
 # experiment...
 git add -A  git commit -m "spike: uefi loader prototype + notes"
-git push -u origin spike/uefi-loader   `
+git push -u origin spike/uefi-loader
 ```
 PR should clearly state whether it’s meant to merge or just document results.
 
