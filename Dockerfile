@@ -39,10 +39,10 @@ RUN curl https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
 # Install LLVM 18 toolchain pinned versions
 RUN apt-get update -y && \
     apt-get install -y \
-      clang-18=1:18.1.8-1~ubuntu0.22.04.1 \
-      llvm-18=1:18.1.8-1~ubuntu0.22.04.1 \
-      lld-18=1:18.1.8-1~ubuntu0.22.04.1 \
-      llvm-18-tools=1:18.1.8-1~ubuntu0.22.04.1 && \
+      clang-18=1:18.2.0-1~ubuntu0.22.04.1 \
+      llvm-18=1:18.2.0-1~ubuntu0.22.04.1 \
+      lld-18=1:18.2.0-1~ubuntu0.22.04.1 \
+      llvm-18-tools=1:18.2.0-1~ubuntu0.22.04.1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Create symbolic links so unversioned names work too

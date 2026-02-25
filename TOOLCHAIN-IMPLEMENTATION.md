@@ -33,12 +33,12 @@ This document verifies the compiler toolchain definition meets all acceptance cr
 
 ```json
 {
-  "llvm": { "version": "18.1.8" },
-  "clang": { "version": "18.1.8" },
-  "lld": { "version": "18.1.8" },
-  "llvm-objcopy": { "version": "18.1.8" },
-  "llvm-objdump": { "version": "18.1.8" },
-  "llvm-ar": { "version": "18.1.8" },
+  "llvm": { "version": "18.2.0" },
+  "clang": { "version": "18.2.0" },
+  "lld": { "version": "18.2.0" },
+  "llvm-objcopy": { "version": "18.2.0" },
+  "llvm-objdump": { "version": "18.2.0" },
+  "llvm-ar": { "version": "18.2.0" },
   "nasm": { "version": "2.15.05" },
   "make": { "version": "4.4" },
   "rust": { "version": "1.75.0" },
@@ -52,9 +52,9 @@ This document verifies the compiler toolchain definition meets all acceptance cr
 # Ubuntu 22.04 LTS (stable base)
 FROM ubuntu:22.04
 
-# LLVM 18.1.8
-apt-get install clang-18=1:18.1.8-1~ubuntu0.22.04.1
-apt-get install lld-18=1:18.1.8-1~ubuntu0.22.04.1
+# LLVM 18.2.0
+apt-get install clang-18=1:18.2.0-1~ubuntu0.22.04.1
+apt-get install lld-18=1:18.2.0-1~ubuntu0.22.04.1
 
 # NASM 2.15.05
 apt-get install nasm=2.15.05-1
@@ -118,8 +118,8 @@ The Docker-based build environment ensures:
 | Component | Pinned? | How | Evidence |
 |-----------|---------|-----|----------|
 | OS | ✓ | Ubuntu 22.04 LTS (5-year stable) | `FROM ubuntu:22.04` |
-| Compiler | ✓ | LLVM 18.1.8 exact version | `clang-18=1:18.1.8-1~ubuntu0.22.04.1` |
-| Linker | ✓ | LLD 18.1.8 exact version | `lld-18=1:18.1.8-1~ubuntu0.22.04.1` |
+| Compiler | ✓ | LLVM 18.2.0 exact version | `clang-18=1:18.2.0-1~ubuntu0.22.04.1` |
+| Linker | ✓ | LLD 18.2.0 exact version | `lld-18=1:18.2.0-1~ubuntu0.22.04.1` |
 | Assembler | ✓ | NASM 2.15.05 | `nasm=2.15.05-1` |
 | Build tools | ✓ | Make 4.4, pkg-config | `make=4.3-4.1` |
 | Rust | ✓ | 1.75.0 | `rustup 1.75.0` |
@@ -176,7 +176,7 @@ jobs:
   build:
     needs: build-image
     steps:
-      # Runs INSIDE container with LLVM 18.1.8, LLD, NASM, etc.
+      # Runs INSIDE container with LLVM 18.2.0, LLD, NASM, etc.
       - name: Build LumenOS
         run: docker run --rm -v $(pwd):/workspace lumenos-build:latest make build
   
@@ -197,7 +197,7 @@ jobs:
 
 2. **build-image** (1-2 min)
    - Builds Docker image from `Dockerfile`
-   - Pins LLVM 18.1.8, LLD, NASM, etc.
+   - Pins LLVM 18.2.0, LLD, NASM, etc.
    - Caches layers for speed
 
 3. **build** (2-5 min)

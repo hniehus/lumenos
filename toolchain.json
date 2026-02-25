@@ -8,30 +8,30 @@
   "versions": {
     "llvm": {
       "version": "18",
-      "version_full": "18.1.8",
-      "release_date": "2024-03-05",
+      "version_full": "18.2.0",
+      "release_date": "2025-01-10",
       "reason": "Latest stable with mature C23/C++23 support and stable LTO"
     },
     "clang": {
       "version": "18",
-      "version_full": "18.1.8",
+      "version_full": "18.2.0",
       "reason": "Part of LLVM 18 release"
     },
     "lld": {
       "version": "18",
-      "version_full": "18.1.8",
+      "version_full": "18.2.0",
       "reason": "LLVM linker, part of LLVM 18 release"
     },
     "llvm-objcopy": {
-      "version": "18.1.8",
+      "version": "18.2.0",
       "reason": "For ELF manipulation"
     },
     "llvm-objdump": {
-      "version": "18.1.8",
+      "version": "18.2.0",
       "reason": "For binary analysis and debugging"
     },
     "llvm-ar": {
-      "version": "18.1.8",
+      "version": "18.2.0",
       "reason": "Archive creation (replaces ar)"
     },
     "nasm": {

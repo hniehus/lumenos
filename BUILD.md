@@ -34,8 +34,8 @@ make build
 
 See [**`toolchain.json`**](toolchain.json) for exact versions:
 
-- **LLVM/Clang**: 18.1.8
-- **LLD**: 18.1.8
+- **LLVM/Clang**: 18.2.0
+- **LLD**: 18.2.0
 - **NASM**: 2.15.05
 - **Rust**: 1.75.0
 - **QEMU**: 8.2.0+

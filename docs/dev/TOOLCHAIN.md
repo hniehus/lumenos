@@ -18,10 +18,10 @@ This document defines the compiler toolchain, version pinning strategy, and repr
 - **C Standards**: Excellent C23 and C++ support (forward-compatible)
 
 **Specific Versions** (see [`toolchain.json`](../../toolchain.json)):
-- **LLVM**: 18.1.8
-- **Clang**: 18.1.8
-- **LLD**: 18.1.8
-- **LLVM Tools**: llvm-ar, llvm-objcopy, llvm-objdump (version 18.1.8)
+- **LLVM**: 18.2.0
+- **Clang**: 18.2.0
+- **LLD**: 18.2.0
+- **LLVM Tools**: llvm-ar, llvm-objcopy, llvm-objdump (version 18.2.0)
 
 ### Alternative: GCC + binutils
 
@@ -210,8 +210,8 @@ jobs:
 
 The Dockerfile ensures:
 - ✅ **Same OS**: Ubuntu 22.04 (LTS, stable)
-- ✅ **Same compiler**: LLVM 18.1.8 (exact version pinning)
-- ✅ **Same linker**: LLD 18.1.8
+- ✅ **Same compiler**: LLVM 18.2.0 (exact version pinning)
+- ✅ **Same linker**: LLD 18.2.0
 - ✅ **Same assembler**: NASM 2.15.05
 - ✅ **Same runtime**: Rust 1.75.0 (if used)
 - ✅ **Same tools**: Make, pkg-config, etc.
@@ -290,7 +290,7 @@ The toolchain is not installed. Options:
 
 Could indicate:
 - **Timestamp drift**: Rebuild inside Docker (has fixed timestamps)
-- **Compiler version mismatch**: Verify `clang-18 --version` matches `18.1.8`
+- **Compiler version mismatch**: Verify `clang-18 --version` matches `18.2.0`
 - **Optimization flags**: Check CFLAGS in Makefile consistency
 
 **Solution:**
@@ -326,7 +326,7 @@ sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
 
 Toolchain versions are reviewed quarterly (or when CVEs are announced):
 
-- **February 2026**: Reviewed, LLVM 18.1.8 approved
+- **February 2026**: Reviewed, LLVM 18.2.0 approved
 - **May 2026**: Scheduled review
 - **August 2026**: Scheduled review
 - **November 2026**: Scheduled review

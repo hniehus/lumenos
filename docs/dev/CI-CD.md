@@ -23,13 +23,13 @@ The GitHub Actions CI pipeline (`.github/workflows/ci.yml`) builds LumenOS using
 
 ### 2. **build-image** (Medium)
 - Builds Docker image from `Dockerfile`
-- Caches LLVM 18.1.8 and dependencies
+- Caches LLVM 18.2.0 and dependencies
 - Displays toolchain version report
 - Uses GitHub Actions cache to speed up rebuilds
 
 ### 3. **build** (Main work)
 - Runs `make build` inside the container
-- Uses pinned LLVM 18.1.8, LLD, NASM, etc.
+- Uses pinned LLVM 18.2.0, LLD, NASM, etc.
 - Currently placeholder (TODO: actual kernel build)
 - **Outputs**: Kernel ELF, binary, bootable image
 
@@ -54,11 +54,11 @@ The `Dockerfile` pins:
 # Ubuntu base (stable)
 FROM ubuntu:22.04
 
-# LLVM 18.1.8
-apt-get install clang-18=1:18.1.8-1~ubuntu0.22.04.1
+# LLVM 18.2.0
+apt-get install clang-18=1:18.2.0-1~ubuntu0.22.04.1
 
-# LLD 18.1.8
-apt-get install lld-18=1:18.1.8-1~ubuntu0.22.04.1
+# LLD 18.2.0
+apt-get install lld-18=1:18.2.0-1~ubuntu0.22.04.1
 
 # Other tools (exact versions)
 apt-get install nasm=2.15.05-1 make=4.3-4.1

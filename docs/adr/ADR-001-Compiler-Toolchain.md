@@ -32,9 +32,9 @@ We needed to evaluate and decide between:
 We choose **LLVM/Clang + LLD** as the primary compiler toolchain.
 
 **Specific versions (pinned in `toolchain.json`)**:
-- LLVM: 18.1.8
-- Clang: 18.1.8
-- LLD: 18.1.8
+- LLVM: 18.2.0
+- Clang: 18.2.0
+- LLD: 18.2.0
 - NASM: 2.15.05
 
 ---
@@ -137,7 +137,7 @@ We choose **LLVM/Clang + LLD** as the primary compiler toolchain.
 
 ✓ **Completed**:
 - `toolchain.json` pinned versions
-- Dockerfile with LLVM 18.1.8
+- Dockerfile with LLVM 18.2.0
 - `.devcontainer/devcontainer.json` for VS Code
 - `scripts/install-toolchain.sh` for manual setup
 - Updated CI/CD pipeline (`.github/workflows/ci.yml`)
@@ -168,7 +168,7 @@ make build
 ```
 
 ### For CI/CD
-All GitHub Actions workflows use the Dockerfile, ensuring every build uses LLVM 18.1.8.
+All GitHub Actions workflows use the Dockerfile, ensuring every build uses LLVM 18.2.0.
 
 ---
 

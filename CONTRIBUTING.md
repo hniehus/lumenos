@@ -22,12 +22,12 @@
   - `rustfmt` clean
   - No `unsafe` unless justified in comments and kept minimal
 - Formatting:
-  - C: `clang-format` (via pinned Clang 18.1.8)
+  - C: `clang-format` (via pinned Clang 18.2.0)
   - Shell: `shellcheck`
 
 ## Build environment & toolchain
 
-**The toolchain is pinned for reproducibility.** All developers and CI use identical versions (LLVM 18.1.8, NASM 2.15.05, etc.).
+**The toolchain is pinned for reproducibility.** All developers and CI use identical versions (LLVM 18.2.0, NASM 2.15.05, etc.).
 
 **Setup (pick one):**
 
