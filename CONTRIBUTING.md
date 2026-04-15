@@ -1,44 +1,33 @@
 # Contributing to LumenOS
 
-## Ground rules
-- Keep the system **clean**: prefer small, composable primitives over feature piles.
-- No “quick hacks” that become permanent.
-- If you introduce a new abstraction, you must explain why it’s needed.
+This document sets contribution expectations for LumenOS. The project is an early-stage open-source operating system effort, and the repository should be treated as starter infrastructure for disciplined bring-up work rather than as a broad feature playground.
 
-## Workflow
-1. Fork + create a feature branch
-2. Keep commits small and descriptive
-3. Open a PR with:
-   - What changed
-   - Why it changed
-   - How to test it (QEMU steps, expected serial output, etc.)
+The current first target is narrow by design: `x86_64` on `QEMU` using `Limine`, with attention on early boot, handoff correctness, and kernel bring-up. Contributions should support that direction or improve the documentation and repository structure around it.
 
-## Coding standards
-- Kernel C:
-  - Avoid undefined behavior
-  - No dynamic allocation in early boot paths unless explicitly designed
-  - Prefer explicit error handling
-- Rust:
-  - `rustfmt` clean
-  - No `unsafe` unless justified in comments and kept minimal
-- Formatting:
-  - C: `clang-format`
-  - Shell: `shellcheck`
+## Scope of contributions
 
-## Testing expectations
-At minimum, changes should:
-- Build successfully
-- Boot in QEMU
-- Not regress the serial log expectations for M1
+Useful contributions at this stage include focused work on boot flow, kernel bring-up, architecture documentation, specifications, build scaffolding, and repository hygiene. Changes that introduce large new subsystems, policy-heavy abstractions, or speculative platform breadth before the first bring-up path is established should be avoided.
 
-## Reporting issues
-When filing an issue, include:
-- Host OS + versions (Ubuntu version, QEMU version)
-- Repro steps
-- Serial log output
+## Expectations for contributors
 
-## Security
-If you find a security issue, do not post exploit details publicly. Create a private report (process TBD).
+- Keep changes small, reviewable, and technically explicit.
+- Prefer one clear purpose per commit and one focused concern per pull request.
+- Explain what changed, why it changed, and how it was validated.
+- Respect the current repository structure and the present bring-up target instead of designing for a much later system.
+
+## Architecture discipline
+
+LumenOS values clarity, minimalism, and deliberate architectural decisions. Avoid uncontrolled scope creep, convenience abstractions without a clear need, or temporary shortcuts that would become part of the long-term design.
+
+If a change introduces a new abstraction, broadens the kernel boundary, alters the boot path, or changes an architectural assumption, document the rationale clearly in the pull request and update the relevant documentation in [`docs/`](docs) when appropriate.
+
+## Reviewability and testing
+
+Pull requests should stay compact enough to review carefully. When possible, include concrete validation notes appropriate to the current stage of the project, such as build status, `QEMU` boot behavior, and relevant serial output observations.
+
+## Before Branching
+
+The branching rules below define how work is expected to move through the repository. Read them before opening longer-lived work so the contribution shape and branch strategy stay aligned.
 
 ## Branching strategy
 

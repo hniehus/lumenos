@@ -1,46 +1,51 @@
 # LumenOS
 
-LumenOS is an open-source, from-scratch desktop operating system targeting **x86-64** first, designed to be **clean**, **lightweight**, and **high-performance**.
+LumenOS is a new open-source operating system project. This repository currently serves as the starter foundation for early boot and kernel bring-up work, with an emphasis on architectural clarity and disciplined scope control.
 
-## Goals (high level)
-- Modern, capability-oriented security model (no “everything is global”)
-- Fast boot + responsive desktop latency (input-to-frame focus)
-- SMP + preemptive multitasking from day one
-- Clear separation of **mechanisms (kernel)** and **policies (userspace services)**
-- Portability-friendly architecture (x86-64 first, easy to add new architectures later)
+## Status
 
-## Milestone 1 (M1) definition
-**Boot → SMP → Scheduler → Userspace init → Minimal shell**
+LumenOS is in an early-stage system-project phase. This repository is intentionally minimal and should be read as a starting point for bring-up, architecture definition, and repository discipline rather than as a feature-complete operating system.
 
-Out of scope for M1:
-- Full driver stack (beyond what is needed for boot + serial)
-- Graphics stack / compositor
-- Networking
+The current state is focused on establishing project structure, documenting architectural intent, and defining the constraints for the first executable path.
 
-## Repository structure
-- `kernel/` — kernel sources (arch, mm, sched, ipc, drivers, etc.)
-- `user/` — userspace programs (`init`, `shell`, minimal libc/runtime)
-- `tools/` — build/CI/debug helpers
-- `docs/` — architecture decisions (ADR), design notes, developer docs
-- `scripts/` — utility scripts
-- `.github/` — CI workflows
+## Vision
 
-## Quick start (Ubuntu)
-### Requirements
-This repo expects a Linux host (Ubuntu recommended) with QEMU, OVMF, LLVM/Clang, NASM, and Rust.
+LumenOS aims to grow into a clean, understandable operating system with explicit architectural boundaries, a controlled boot path, and a foundation that can evolve without accumulating accidental complexity.
 
-If you used the bootstrap script, most dependencies are already installed.
+## Current bring-up target
 
-### Build (placeholder)
-For now, this is a scaffold. The build system will live in `tools/build/` and top-level `Makefile`.
+The first bring-up target is deliberately narrow:
 
-Typical goals will look like:
-- `make build`
-- `make run`
-- `make debug`
+- `x86_64` as the initial architecture
+- `QEMU` as the execution and debugging environment
+- `Limine` as the bootloader and boot protocol base
+- early boot and kernel bring-up as the immediate engineering focus
+
+This combination is a practical first target because it keeps hardware assumptions controlled, shortens the feedback loop during bring-up, and allows the boot interface to be specified clearly before broader platform work begins.
+
+## Repository layout
+
+The repository is still at an early stage, so some expected top-level areas are planned rather than present today.
+
+- `bootsector/` (planned): experimental or educational low-level boot work; not the primary bring-up path
+- `bootloader/` (planned): the intended real boot path for the current bring-up target
+- [`docs/`](docs): architecture material and evolving technical specifications
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): contribution workflow and project rules
+- `LICENSE` (not present yet): project license file once licensing is finalized
+
+## Documentation
+
+Current architecture documentation lives under [`docs/architecture/arc42/`](docs/architecture/arc42/), starting with [`docs/architecture/arc42/README.md`](docs/architecture/arc42/README.md).
+
+The repository does not currently contain `documentation/specs/boot-contract.md` or `docs/specs/boot-contract.md`. For now, the boot contract direction is described in the arc42 architecture baseline, especially:
+
+- [`docs/architecture/arc42/06-runtime-view.md`](docs/architecture/arc42/06-runtime-view.md)
+- [`docs/architecture/arc42/09-architecture-decisions-and-open-questions.md`](docs/architecture/arc42/09-architecture-decisions-and-open-questions.md)
 
 ## Contributing
-See `CONTRIBUTING.md` (or `Contribution.md`) for guidelines.
+
+Contribution rules, workflow expectations, and branch discipline are defined in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
-TBD (choose early to avoid legal ambiguity).
+
+A root `LICENSE` file has not been added yet. Licensing should be treated as undecided until that file is present in the repository.
