@@ -41,4 +41,62 @@ The currently visible interpretation of the decisions from boot protocol, bootst
 
 These assumptions are now treated as part of the architecture baseline and should be formalized in ADRs and protocol specifications.
 
----
+## 2.5 Implementation Language Constraint
+
+The implementation language strategy is part of the architecture, not a local coding preference.
+
+For the current baseline, LumenOS adopts the following language constraint:
+
+- **Rust is the default implementation language**
+- **C23 is restricted to narrow low-level or interoperability boundaries**
+- **Inline and standalone assembly are restricted to CPU-near paths where machine state or instruction-level control is the actual contract**
+
+This constraint exists to preserve architectural coherence as the system grows.
+
+### Language roles
+
+#### Rust
+
+Rust is the default language for:
+- kernel logic above the most CPU-near entry and exit fragments
+- kernel object handling
+- capability mediation
+- address-space and VMO logic
+- scheduler structure and most scheduling logic
+- IPC logic
+- bootstrap handling above the lowest handoff layer
+- user-space runtime and service code by default
+
+#### C23
+
+C23 is allowed only for:
+- thin ABI shims
+- sharply bounded low-level compatibility layers
+- constrained interoperability boundaries where a C ABI is the clearest fit
+
+C23 is **not** intended to become a second general-purpose systems language for LumenOS.
+
+#### Inline or standalone assembly
+
+Assembly is allowed for:
+- early boot entry fragments
+- trap and interrupt stubs
+- syscall entry and exit stubs
+- context-switch core fragments
+- very early CPU setup transitions
+- isolated architecture-specific instruction sequences requiring exact control
+
+Assembly is not the default expression language for general kernel behavior.
+
+### Constraint rationale
+
+This language split supports the broader architectural goals:
+
+- keep the main body of the system expressive and reviewable
+- keep unsafe boundaries small and intentional
+- keep machine-contract code visible and isolated
+- prevent accidental drift into a mixed-language kernel without clear rules
+
+### Constraint consequence
+
+Any intentional expansion of C23 or assembly beyond this narrow role should be treated as an architecture-affecting change and evaluated through an ADR.

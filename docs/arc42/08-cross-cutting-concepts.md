@@ -35,7 +35,83 @@ The architecture now treats both early transitions as cross-cutting concerns:
 - the **bootstrap protocol** prevents vague or expanding responsibilities between early kernel code and init
 - both contracts reduce ambiguity, make bring-up debuggable, and form a cleaner base for later security work
 
-## 8.7 Security Direction
+## 8.7 Implementation Language Strategy
+
+The implementation language policy is a cross-cutting concept because it shapes how invariants, unsafe boundaries, and machine-near code are expressed across the entire system.
+
+The architectural intent is simple:
+
+- **Rust first**
+- **C23 only at narrow boundaries**
+- **Assembly only where the instruction set is effectively the interface**
+
+### Why this matters architecturally
+
+Language choice is not just a tooling preference. In LumenOS, it directly affects:
+
+- how clearly invariants are expressed
+- how much unsafe behavior is concentrated or dispersed
+- how reviewable low-level code remains
+- how visible CPU-contract code is
+- how likely the system is to drift into accidental multi-language complexity
+
+### Rust as the main implementation language
+
+Rust carries the main body of the implementation because it is the best fit for:
+
+- explicit interfaces
+- ownership-sensitive logic
+- kernel object handling
+- capability mediation
+- VM and bootstrap logic
+- IPC logic
+- service logic outside the kernel
+
+The goal is not “Rust everywhere no matter what.”
+The goal is to keep the default language aligned with architectural clarity and controlled unsafe boundaries.
+
+### C23 as a constrained boundary language
+
+C23 remains available, but only as a narrow tool for:
+- ABI-oriented boundaries
+- constrained interoperability layers
+- small low-level shims where a C-shaped interface is the clearest boundary
+
+The architectural risk of unconstrained C23 use is obvious:
+the codebase begins to split into two default implementation cultures, and the system loses its disciplined center.
+
+### Assembly as machine-contract code
+
+Assembly is necessary in places where the machine itself is the interface.
+Those places include:
+
+- boot entry
+- trap and interrupt stubs
+- syscall entry and exit
+- context-switch core
+- very early CPU setup transitions
+- tightly scoped instruction-level helpers
+
+Architecture-wise, this code should remain:
+- minimal
+- isolated
+- heavily constrained by comments and invariants
+- easy to identify as special-purpose code
+
+### Unsafe boundary strategy
+
+Unsafe behavior should not spread invisibly across the codebase.
+
+The preferred structure is:
+
+- keep most logic in Rust
+- isolate machine-near code into tight assembly or low-level boundary layers
+- make Rust-to-assembly and Rust-to-C boundaries explicit
+- document assumptions where correctness depends on calling convention, register state, memory layout, or privileged CPU behavior
+
+This is a cross-cutting quality concern, not merely a code-style preference.
+
+## 8.8 Security Direction
 
 There is already a visible bias toward:
 
@@ -45,5 +121,3 @@ There is already a visible bias toward:
 - future hardening without architectural inversion
 
 The exact hardening stack remains open.
-
----
