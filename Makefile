@@ -4,6 +4,7 @@ ISO := $(BUILD_DIR)/lumenos.iso
 BOOTLOG := $(BUILD_DIR)/boot.log
 
 KERNEL := $(BUILD_DIR)/kernel.elf
+ROOT_TASK := $(BUILD_DIR)/bootstrap.elf
 GENERATED_DIR := $(BUILD_DIR)/generated
 KERNEL_VERSION_H := $(GENERATED_DIR)/version.h
 KERNEL_VERSION_TXT := $(BUILD_DIR)/kernel_version.txt
@@ -17,11 +18,13 @@ LIMINE_BIOS_CD := $(LIMINE_DIR)/limine-bios-cd.bin
 LIMINE_UEFI_CD := $(LIMINE_DIR)/limine-uefi-cd.bin
 LIMINE_EFI := $(LIMINE_DIR)/BOOTX64.EFI
 
-.PHONY: all kernel version print-version iso-root image run smoke clean FORCE
+.PHONY: all kernel root-task version print-version iso-root image run smoke clean FORCE
 
 all: image
 
 kernel: FORCE $(KERNEL)
+
+root-task: $(ROOT_TASK)
 
 FORCE:
 
@@ -59,7 +62,29 @@ $(KERNEL): kernel/src/main.c kernel/include/limine.h kernel/linker.ld $(KERNEL_V
 		-I$(GENERATED_DIR) \
 		-o $(KERNEL)
 
-iso-root: kernel
+$(ROOT_TASK): root-task/src/main.c
+	@mkdir -p $(BUILD_DIR)
+	clang root-task/src/main.c \
+		-std=c23 \
+		-ffreestanding \
+		-fno-stack-protector \
+		-fno-pic \
+		-fno-asynchronous-unwind-tables \
+		-fno-unwind-tables \
+		-m64 \
+		-mno-red-zone \
+		-static \
+		-nostdlib \
+		-nostartfiles \
+		-fuse-ld=lld \
+		-Wall \
+		-Wextra \
+		-Wl,-m,elf_x86_64 \
+		-Wl,-e,_start \
+		-Wl,--build-id=none \
+		-o $(ROOT_TASK)
+
+iso-root: kernel root-task
 	@rm -rf $(ISO_ROOT)
 	@mkdir -p $(ISO_ROOT)/boot
 	@mkdir -p $(ISO_ROOT)/boot/limine
@@ -67,6 +92,7 @@ iso-root: kernel
 	cp limine.conf $(ISO_ROOT)/limine.conf
 	cp limine.conf $(ISO_ROOT)/boot/limine/limine.conf
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
+	cp $(ROOT_TASK) $(ISO_ROOT)/boot/bootstrap.elf
 	cp $(LIMINE_BIOS_SYS) $(ISO_ROOT)/limine-bios.sys
 	cp $(LIMINE_BIOS_SYS) $(ISO_ROOT)/boot/limine/limine-bios.sys
 	cp $(LIMINE_BIOS_CD) $(ISO_ROOT)/limine-bios-cd.bin
