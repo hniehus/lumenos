@@ -32,6 +32,9 @@
 #define TSS_SELECTOR 0x28u
 #define USER_CS_SELECTOR 0x1bu
 #define USER_SS_SELECTOR 0x23u
+#define SYSCALL_VECTOR 0x80u
+#define SYSCALL_DEBUG_WRITE 1ULL
+#define SYSCALL_DEBUG_WRITE_MAX 256ULL
 
 #define USED __attribute__((used))
 #define SECTION(name) __attribute__((section(name)))
@@ -188,6 +191,13 @@ static void serial_write_char(char byte) {
 static void serial_write_string(const char *text) {
     while (*text != '\0') {
         serial_write_char(*text++);
+    }
+}
+
+static void serial_write_buffer(const char *text, uint64_t len) {
+    while (len > 0) {
+        serial_write_char(*text++);
+        --len;
     }
 }
 
@@ -857,6 +867,33 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
     return 0;
 }
 
+static const char *translate_root_task_user_buffer(
+    uint64_t user_ptr,
+    uint64_t len,
+    const char **kernel_ptr_out) {
+    uint64_t end = user_ptr + len;
+
+    if (len == 0 || len > SYSCALL_DEBUG_WRITE_MAX) {
+        return "length bad";
+    }
+
+    if (end < user_ptr) {
+        return "range overflow";
+    }
+
+    if (user_ptr >= root_task_image.base_vaddr && end <= root_task_image.end_vaddr) {
+        *kernel_ptr_out = (const char *)(root_task_image_pages + (user_ptr - root_task_image.base_vaddr));
+        return 0;
+    }
+
+    if (user_ptr >= root_task_launch_state.stack_base && end <= root_task_launch_state.stack_top) {
+        *kernel_ptr_out = (const char *)(root_task_stack_pages + (user_ptr - root_task_launch_state.stack_base));
+        return 0;
+    }
+
+    return "range invalid";
+}
+
 static void set_idt_gate(uint8_t vector, void (*handler)(void), uint8_t type_attr) {
     uint64_t offset = (uint64_t)handler;
 
@@ -872,6 +909,26 @@ static void set_idt_gate(uint8_t vector, void (*handler)(void), uint8_t type_att
 __attribute__((noreturn)) void handle_user_proof_trap(void) {
     serial_write_string("user: first instruction reached\n");
     halt_forever();
+}
+
+uint64_t handle_user_syscall(uint64_t number, uint64_t user_ptr, uint64_t len) {
+    const char *kernel_ptr;
+    const char *error;
+
+    if (number != SYSCALL_DEBUG_WRITE) {
+        serial_write_string("kernel: syscall invalid number\n");
+        return UINT64_MAX;
+    }
+
+    error = translate_root_task_user_buffer(user_ptr, len, &kernel_ptr);
+    if (error != 0) {
+        serial_write_string("kernel: syscall invalid arg\n");
+        return UINT64_MAX;
+    }
+
+    serial_write_buffer(kernel_ptr, len);
+    serial_write_string("kernel: syscall handled\n");
+    return len;
 }
 
 __attribute__((noreturn)) void handle_user_general_protection(uint64_t error_code) {
@@ -907,6 +964,17 @@ __attribute__((naked)) void user_page_fault_stub(void) {
         "call handle_user_page_fault\n");
 }
 
+__attribute__((naked)) void user_syscall_stub(void) {
+    __asm__ volatile(
+        "cld\n"
+        "movq %rdi, %rcx\n"
+        "movq %rsi, %rdx\n"
+        "movq %rax, %rdi\n"
+        "movq %rcx, %rsi\n"
+        "call handle_user_syscall\n"
+        "iretq\n");
+}
+
 static void install_kernel_idt(void) {
     struct idt_descriptor idtr = {
         .limit = sizeof(kernel_idt) - 1,
@@ -917,6 +985,7 @@ static void install_kernel_idt(void) {
     set_idt_gate(3, user_proof_trap_stub, 0xee);
     set_idt_gate(13, user_general_protection_stub, 0x8e);
     set_idt_gate(14, user_page_fault_stub, 0x8e);
+    set_idt_gate(SYSCALL_VECTOR, user_syscall_stub, 0xee);
     __asm__ volatile("lidt %0" : : "m"(idtr) : "memory");
 }
 

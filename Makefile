@@ -130,6 +130,9 @@ run: image
 
 smoke: run
 	@grep -q "kernel: early boot ok" $(BOOTLOG)
+	@grep -q "kernel: entering user mode" $(BOOTLOG)
+	@grep -q "user: hello lumen" $(BOOTLOG)
+	@grep -q "kernel: syscall handled" $(BOOTLOG)
 
 clean:
 	rm -rf $(BUILD_DIR)
