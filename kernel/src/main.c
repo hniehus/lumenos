@@ -11,13 +11,27 @@
 #define ELF_TYPE_DYN 3
 #define ELF_MACHINE_X86_64 62
 #define PT_LOAD 1
+#define PF_X 0x1
+#define PF_W 0x2
 #define ROOT_TASK_IMAGE_CAPACITY (1024 * 1024)
+#define KERNEL_STACK_SIZE (64 * 1024ULL)
 #define USER_ADDRESS_TOP 0x0000800000000000ULL
 #define USER_STACK_SIZE (64 * 1024ULL)
 #define USER_STACK_TOP 0x00007fffffff0000ULL
-#define USER_RFLAGS_INITIAL 0x202ULL
-#define USER_CS_SELECTOR 0x23u
-#define USER_SS_SELECTOR 0x1bu
+#define PAGE_SIZE 0x1000ULL
+#define PAGE_PRESENT 0x001ULL
+#define PAGE_WRITABLE 0x002ULL
+#define PAGE_USER 0x004ULL
+#define PAGE_HUGE 0x080ULL
+#define PAGE_NX (1ULL << 63)
+#define PAGE_ADDR_MASK 0x000ffffffffff000ULL
+#define PAGE_TABLE_POOL_PAGES 8
+#define USER_RFLAGS_INITIAL 0x0002ULL
+#define KERNEL_CS_SELECTOR 0x08u
+#define KERNEL_DS_SELECTOR 0x10u
+#define TSS_SELECTOR 0x28u
+#define USER_CS_SELECTOR 0x1bu
+#define USER_SS_SELECTOR 0x23u
 
 #define USED __attribute__((used))
 #define SECTION(name) __attribute__((section(name)))
@@ -55,7 +69,6 @@ struct root_task_image {
     uint64_t end_vaddr;
     uint64_t entry;
     uint64_t load_segment_count;
-    uint8_t bytes[ROOT_TASK_IMAGE_CAPACITY];
 };
 
 struct root_task_context {
@@ -85,11 +98,65 @@ struct root_task_launch_state {
     uint64_t stack_top;
     struct root_task_context context;
     struct root_task_launch_frame frame;
-    uint8_t stack[USER_STACK_SIZE];
 };
+
+struct gdt_descriptor {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed));
+
+struct idt_entry {
+    uint16_t offset_low;
+    uint16_t selector;
+    uint8_t ist;
+    uint8_t type_attr;
+    uint16_t offset_mid;
+    uint32_t offset_high;
+    uint32_t zero;
+} __attribute__((packed));
+
+struct idt_descriptor {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed));
+
+struct tss64 {
+    uint32_t reserved0;
+    uint64_t rsp0;
+    uint64_t rsp1;
+    uint64_t rsp2;
+    uint64_t reserved1;
+    uint64_t ist1;
+    uint64_t ist2;
+    uint64_t ist3;
+    uint64_t ist4;
+    uint64_t ist5;
+    uint64_t ist6;
+    uint64_t ist7;
+    uint64_t reserved2;
+    uint16_t reserved3;
+    uint16_t iomap_base;
+} __attribute__((packed));
 
 static struct root_task_image root_task_image;
 static struct root_task_launch_state root_task_launch_state;
+uint8_t kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t root_task_image_pages[ROOT_TASK_IMAGE_CAPACITY] __attribute__((aligned(PAGE_SIZE)));
+static uint8_t root_task_stack_pages[USER_STACK_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static uint8_t page_table_pool[PAGE_TABLE_POOL_PAGES][PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t page_table_pool_used = 0;
+static uint64_t hhdm_offset = 0;
+static uint64_t user_low_pdpt_phys = 0;
+static uint64_t user_high_pdpt_phys = 0;
+static uint64_t kernel_gdt[7] __attribute__((aligned(16))) = {
+    0x0000000000000000ULL,
+    0x00af9a000000ffffULL,
+    0x00cf92000000ffffULL,
+    0x00affa000000ffffULL,
+    0x00cff2000000ffffULL,
+};
+static struct tss64 kernel_tss;
+static struct idt_entry kernel_idt[256];
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -174,6 +241,10 @@ static void memory_zero(uint8_t *dst, uint64_t len) {
 
 static uint64_t align_down(uint64_t value, uint64_t alignment) {
     return value & ~(alignment - 1);
+}
+
+static uint64_t align_up(uint64_t value, uint64_t alignment) {
+    return align_down(value + alignment - 1, alignment);
 }
 
 static int serial_init(void) {
@@ -349,6 +420,226 @@ static int user_vaddr_plausible(uint64_t vaddr, uint64_t memsz) {
     return 1;
 }
 
+static uint64_t read_cr3(void) {
+    uint64_t value;
+
+    __asm__ volatile("mov %%cr3, %0" : "=r"(value));
+    return value;
+}
+
+static void *phys_to_hhdm(uint64_t phys) {
+    return (void *)(phys + hhdm_offset);
+}
+
+static uint64_t *allocate_page_table(void) {
+    uint64_t *page;
+
+    if (page_table_pool_used >= PAGE_TABLE_POOL_PAGES) {
+        return 0;
+    }
+
+    page = (uint64_t *)page_table_pool[page_table_pool_used++];
+    memory_zero((uint8_t *)page, PAGE_SIZE);
+    return page;
+}
+
+static uint64_t translate_kernel_vaddr_to_phys(uint64_t vaddr) {
+    uint64_t pml4_phys = read_cr3() & ~0xfffULL;
+    uint64_t *pml4 = (uint64_t *)phys_to_hhdm(pml4_phys);
+    uint64_t pml4e = pml4[(vaddr >> 39) & 0x1ffULL];
+    uint64_t *pdpt;
+    uint64_t pdpte;
+    uint64_t *pd;
+    uint64_t pde;
+    uint64_t *pt;
+    uint64_t pte;
+
+    if ((pml4e & PAGE_PRESENT) == 0) {
+        return 0;
+    }
+
+    pdpt = (uint64_t *)phys_to_hhdm(pml4e & PAGE_ADDR_MASK);
+    pdpte = pdpt[(vaddr >> 30) & 0x1ffULL];
+    if ((pdpte & PAGE_PRESENT) == 0) {
+        return 0;
+    }
+    if ((pdpte & PAGE_HUGE) != 0) {
+        return (pdpte & 0x000fffffc0000000ULL) | (vaddr & 0x3fffffffULL);
+    }
+
+    pd = (uint64_t *)phys_to_hhdm(pdpte & PAGE_ADDR_MASK);
+    pde = pd[(vaddr >> 21) & 0x1ffULL];
+    if ((pde & PAGE_PRESENT) == 0) {
+        return 0;
+    }
+    if ((pde & PAGE_HUGE) != 0) {
+        return (pde & 0x000fffffffe00000ULL) | (vaddr & 0x1fffffULL);
+    }
+
+    pt = (uint64_t *)phys_to_hhdm(pde & PAGE_ADDR_MASK);
+    pte = pt[(vaddr >> 12) & 0x1ffULL];
+    if ((pte & PAGE_PRESENT) == 0) {
+        return 0;
+    }
+
+    return (pte & PAGE_ADDR_MASK) | (vaddr & 0xfffULL);
+}
+
+static const char *map_user_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
+    uint64_t pml4_phys = read_cr3() & ~0xfffULL;
+    uint64_t *pml4 = (uint64_t *)phys_to_hhdm(pml4_phys);
+    uint64_t pml4_index = (vaddr >> 39) & 0x1ffULL;
+    uint64_t pdpt_index = (vaddr >> 30) & 0x1ffULL;
+    uint64_t pd_index = (vaddr >> 21) & 0x1ffULL;
+    uint64_t pt_index = (vaddr >> 12) & 0x1ffULL;
+    uint64_t *pdpt;
+    uint64_t *pd;
+    uint64_t *pt;
+    uint64_t *new_table;
+    uint64_t new_table_phys;
+
+    if ((vaddr & (PAGE_SIZE - 1)) != 0 || (phys & (PAGE_SIZE - 1)) != 0) {
+        return "page alignment bad";
+    }
+
+    if (pml4_index == 0) {
+        if (user_low_pdpt_phys == 0) {
+            new_table = allocate_page_table();
+            if (new_table == 0) {
+                return "page table pool exhausted";
+            }
+            user_low_pdpt_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+            if (user_low_pdpt_phys == 0) {
+                return "page table phys missing";
+            }
+        }
+        pml4[pml4_index] = user_low_pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    } else if (pml4_index == 0x0ffULL) {
+        if (user_high_pdpt_phys == 0) {
+            new_table = allocate_page_table();
+            if (new_table == 0) {
+                return "page table pool exhausted";
+            }
+            user_high_pdpt_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+            if (user_high_pdpt_phys == 0) {
+                return "page table phys missing";
+            }
+        }
+        pml4[pml4_index] = user_high_pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    } else if ((pml4[pml4_index] & PAGE_PRESENT) == 0) {
+        new_table = allocate_page_table();
+        if (new_table == 0) {
+            return "page table pool exhausted";
+        }
+        new_table_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+        if (new_table_phys == 0) {
+            return "page table phys missing";
+        }
+        pml4[pml4_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    }
+
+    pdpt = (uint64_t *)phys_to_hhdm(pml4[pml4_index] & PAGE_ADDR_MASK);
+    if ((pdpt[pdpt_index] & PAGE_PRESENT) == 0) {
+        new_table = allocate_page_table();
+        if (new_table == 0) {
+            return "page table pool exhausted";
+        }
+        new_table_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+        if (new_table_phys == 0) {
+            return "page table phys missing";
+        }
+        pdpt[pdpt_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    } else if ((pdpt[pdpt_index] & PAGE_HUGE) != 0) {
+        return "pdpt huge page conflict";
+    }
+
+    pd = (uint64_t *)phys_to_hhdm(pdpt[pdpt_index] & PAGE_ADDR_MASK);
+    if ((pd[pd_index] & PAGE_PRESENT) == 0) {
+        new_table = allocate_page_table();
+        if (new_table == 0) {
+            return "page table pool exhausted";
+        }
+        new_table_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+        if (new_table_phys == 0) {
+            return "page table phys missing";
+        }
+        pd[pd_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    } else if ((pd[pd_index] & PAGE_HUGE) != 0) {
+        return "pd huge page conflict";
+    }
+
+    pt = (uint64_t *)phys_to_hhdm(pd[pd_index] & PAGE_ADDR_MASK);
+    pt[pt_index] = (phys & ~0xfffULL) | PAGE_PRESENT | PAGE_USER | flags;
+    __asm__ volatile("invlpg (%0)" : : "r"((void *)vaddr) : "memory");
+    return 0;
+}
+
+static const char *map_user_range(uint64_t vaddr, uint64_t kernel_buffer, uint64_t size, uint64_t flags) {
+    uint64_t current_vaddr = align_down(vaddr, PAGE_SIZE);
+    uint64_t buffer_page = align_down(kernel_buffer, PAGE_SIZE);
+    uint64_t end_vaddr = align_up(vaddr + size, PAGE_SIZE);
+
+    while (current_vaddr < end_vaddr) {
+        uint64_t phys = translate_kernel_vaddr_to_phys(buffer_page);
+        const char *error;
+
+        if (phys == 0) {
+            return "user backing phys missing";
+        }
+
+        error = map_user_page(current_vaddr, phys, flags);
+        if (error != 0) {
+            return error;
+        }
+
+        current_vaddr += PAGE_SIZE;
+        buffer_page += PAGE_SIZE;
+    }
+
+    return 0;
+}
+
+static void set_tss_descriptor(uint64_t base, uint32_t limit) {
+    kernel_gdt[5] = (limit & 0xffffULL)
+        | ((base & 0x00ffffffULL) << 16)
+        | (0x89ULL << 40)
+        | (((uint64_t)(limit >> 16) & 0xfULL) << 48)
+        | (((base >> 24) & 0xffULL) << 56);
+    kernel_gdt[6] = base >> 32;
+}
+
+static void install_kernel_gdt(void) {
+    struct gdt_descriptor gdtr = {
+        .limit = sizeof(kernel_gdt) - 1,
+        .base = (uint64_t)kernel_gdt,
+    };
+
+    memory_zero((uint8_t *)&kernel_tss, sizeof(kernel_tss));
+    kernel_tss.rsp0 = (uint64_t)(kernel_stack + KERNEL_STACK_SIZE);
+    kernel_tss.iomap_base = sizeof(kernel_tss);
+    set_tss_descriptor((uint64_t)&kernel_tss, sizeof(kernel_tss) - 1);
+
+    __asm__ volatile(
+        "lgdt %0\n"
+        "pushq %[cs]\n"
+        "leaq 1f(%%rip), %%rax\n"
+        "pushq %%rax\n"
+        "lretq\n"
+        "1:\n"
+        "movw %[ds], %%ax\n"
+        "movw %%ax, %%ds\n"
+        "movw %%ax, %%es\n"
+        "movw %%ax, %%ss\n"
+        "movw %[tss], %%ax\n"
+        "ltr %%ax\n"
+        :
+        : "m"(gdtr),
+          [cs] "i"(KERNEL_CS_SELECTOR),
+          [ds] "i"(KERNEL_DS_SELECTOR),
+          [tss] "i"(TSS_SELECTOR)
+        : "rax", "memory");
+}
+
 static const char *map_root_task_segments(const struct limine_file *module, uint64_t *entry_out) {
     const struct elf64_ehdr *ehdr = (const struct elf64_ehdr *)module->address;
     const struct elf64_phdr *phdrs =
@@ -405,7 +696,11 @@ static const char *map_root_task_segments(const struct limine_file *module, uint
         return "image too large";
     }
 
-    memory_zero(root_task_image.bytes, ROOT_TASK_IMAGE_CAPACITY);
+    if ((min_vaddr & (PAGE_SIZE - 1)) != 0) {
+        return "image base not page aligned";
+    }
+
+    memory_zero(root_task_image_pages, ROOT_TASK_IMAGE_CAPACITY);
     root_task_image.base_vaddr = min_vaddr;
     root_task_image.end_vaddr = max_vaddr;
     root_task_image.entry = ehdr->e_entry;
@@ -432,7 +727,7 @@ static const char *map_root_task_segments(const struct limine_file *module, uint
             return "segment image range bad";
         }
 
-        dst = root_task_image.bytes + dst_offset;
+        dst = root_task_image_pages + dst_offset;
         src = (const uint8_t *)module->address + phdr->p_offset;
 
         memory_copy(dst, src, phdr->p_filesz);
@@ -470,7 +765,7 @@ static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_
         return "stack pointer invalid";
     }
 
-    memory_zero(root_task_launch_state.stack, USER_STACK_SIZE);
+    memory_zero(root_task_stack_pages, USER_STACK_SIZE);
     root_task_launch_state.stack_base = stack_base;
     root_task_launch_state.stack_top = USER_STACK_TOP;
 
@@ -496,6 +791,157 @@ static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_
     return 0;
 }
 
+static const char *install_root_task_user_mappings(const struct limine_file *module) {
+    const struct elf64_ehdr *ehdr = (const struct elf64_ehdr *)module->address;
+    const struct elf64_phdr *phdrs =
+        (const struct elf64_phdr *)((const uint8_t *)module->address + ehdr->e_phoff);
+    uint16_t index;
+
+    for (index = 0; index < ehdr->e_phnum; ++index) {
+        const struct elf64_phdr *phdr = &phdrs[index];
+        uint64_t segment_flags = 0;
+        uint64_t segment_vaddr;
+        uint64_t segment_size;
+        uint64_t image_offset;
+
+        if (phdr->p_type != PT_LOAD || phdr->p_memsz == 0) {
+            continue;
+        }
+
+        segment_vaddr = align_down(phdr->p_vaddr, PAGE_SIZE);
+        segment_size = align_up((phdr->p_vaddr - segment_vaddr) + phdr->p_memsz, PAGE_SIZE);
+        image_offset = segment_vaddr - root_task_image.base_vaddr;
+
+        if (phdr->p_flags & PF_W) {
+            segment_flags |= PAGE_WRITABLE;
+        }
+        if ((phdr->p_flags & PF_X) == 0) {
+            segment_flags |= PAGE_NX;
+        }
+
+        if (image_offset > ROOT_TASK_IMAGE_CAPACITY || segment_size > ROOT_TASK_IMAGE_CAPACITY - image_offset) {
+            return "user image range bad";
+        }
+
+        if (!user_vaddr_plausible(segment_vaddr, segment_size)) {
+            return "user image vaddr bad";
+        }
+
+        {
+            const char *error = map_user_range(
+                segment_vaddr,
+                (uint64_t)(root_task_image_pages + image_offset),
+                segment_size,
+                segment_flags);
+            if (error != 0) {
+                return error;
+            }
+        }
+    }
+
+    if (!user_vaddr_plausible(root_task_launch_state.stack_base, USER_STACK_SIZE)) {
+        return "user stack vaddr bad";
+    }
+
+    {
+        const char *error = map_user_range(
+        root_task_launch_state.stack_base,
+        (uint64_t)root_task_stack_pages,
+        USER_STACK_SIZE,
+        PAGE_WRITABLE);
+        if (error != 0) {
+            return error;
+        }
+    }
+
+    return 0;
+}
+
+static void set_idt_gate(uint8_t vector, void (*handler)(void), uint8_t type_attr) {
+    uint64_t offset = (uint64_t)handler;
+
+    kernel_idt[vector].offset_low = offset & 0xffffu;
+    kernel_idt[vector].selector = KERNEL_CS_SELECTOR;
+    kernel_idt[vector].ist = 0;
+    kernel_idt[vector].type_attr = type_attr;
+    kernel_idt[vector].offset_mid = (offset >> 16) & 0xffffu;
+    kernel_idt[vector].offset_high = (uint32_t)(offset >> 32);
+    kernel_idt[vector].zero = 0;
+}
+
+__attribute__((noreturn)) void handle_user_proof_trap(void) {
+    serial_write_string("user: first instruction reached\n");
+    halt_forever();
+}
+
+__attribute__((noreturn)) void handle_user_general_protection(uint64_t error_code) {
+    serial_write_string("kernel: user fault general-protection\n");
+    serial_write_string("kernel: user gp code = ");
+    serial_write_hex(error_code);
+    serial_write_string("\n");
+    halt_forever();
+}
+
+__attribute__((noreturn)) void handle_user_page_fault(void) {
+    serial_write_string("kernel: user fault page\n");
+    halt_forever();
+}
+
+__attribute__((naked)) void user_proof_trap_stub(void) {
+    __asm__ volatile(
+        "cld\n"
+        "call handle_user_proof_trap\n");
+}
+
+__attribute__((naked)) void user_general_protection_stub(void) {
+    __asm__ volatile(
+        "popq %rdi\n"
+        "cld\n"
+        "call handle_user_general_protection\n");
+}
+
+__attribute__((naked)) void user_page_fault_stub(void) {
+    __asm__ volatile(
+        "addq $8, %rsp\n"
+        "cld\n"
+        "call handle_user_page_fault\n");
+}
+
+static void install_kernel_idt(void) {
+    struct idt_descriptor idtr = {
+        .limit = sizeof(kernel_idt) - 1,
+        .base = (uint64_t)kernel_idt,
+    };
+
+    memory_zero((uint8_t *)kernel_idt, sizeof(kernel_idt));
+    set_idt_gate(3, user_proof_trap_stub, 0xee);
+    set_idt_gate(13, user_general_protection_stub, 0x8e);
+    set_idt_gate(14, user_page_fault_stub, 0x8e);
+    __asm__ volatile("lidt %0" : : "m"(idtr) : "memory");
+}
+
+__attribute__((noreturn)) static void enter_user_mode(void) {
+    __asm__ volatile(
+        "cli\n"
+        "movq %[rdi], %%rdi\n"
+        "pushq %[ss]\n"
+        "pushq %[rsp]\n"
+        "pushq %[rflags]\n"
+        "pushq %[cs]\n"
+        "pushq %[rip]\n"
+        "iretq\n"
+        :
+        : [rip] "r"(root_task_launch_state.frame.rip),
+          [cs] "r"((uint64_t)root_task_launch_state.frame.cs),
+          [rflags] "r"(root_task_launch_state.frame.rflags),
+          [rsp] "r"(root_task_launch_state.frame.rsp),
+          [ss] "r"((uint64_t)root_task_launch_state.frame.ss),
+          [rdi] "r"(root_task_launch_state.context.rdi)
+        : "memory", "rdi");
+
+    __builtin_unreachable();
+}
+
 USED SECTION(".limine_reqs.start")
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 
@@ -511,10 +957,17 @@ static volatile struct limine_module_request limine_module_request = {
     .internal_modules = 0,
 };
 
+USED SECTION(".limine_reqs.requests")
+static volatile struct limine_hhdm_request limine_hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST_ID,
+    .revision = 0,
+    .response = 0,
+};
+
 USED SECTION(".limine_reqs.end")
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
-__attribute__((noreturn)) void _start(void) {
+__attribute__((noreturn)) void kernel_main(void) {
     struct limine_module_response *module_response;
     struct limine_file *root_task_module;
     const char *elf_error;
@@ -529,6 +982,15 @@ __attribute__((noreturn)) void _start(void) {
         serial_write_string("kernel: unsupported limine base revision\n");
         halt_forever();
     }
+
+    if (limine_hhdm_request.response == 0) {
+        serial_write_string("kernel: hhdm missing\n");
+        halt_forever();
+    }
+
+    hhdm_offset = limine_hhdm_request.response->offset;
+    install_kernel_gdt();
+    install_kernel_idt();
 
     serial_write_string("kernel: early boot ok | version " LUMEN_VERSION_STRING "\n");
 
@@ -595,5 +1057,25 @@ __attribute__((noreturn)) void _start(void) {
     serial_write_string("\n");
     serial_write_string("kernel: root task launch frame prepared\n");
     serial_write_string("kernel: root task launch state prepared\n");
-    halt_forever();
+
+    elf_error = install_root_task_user_mappings(root_task_module);
+    if (elf_error != 0) {
+        serial_write_string("kernel: user map failed | reason ");
+        serial_write_string(elf_error);
+        serial_write_string("\n");
+        halt_forever();
+    }
+
+    serial_write_string("kernel: entering user mode\n");
+    enter_user_mode();
+}
+
+__attribute__((noreturn, naked, section(".text._start"))) void _start(void) {
+    __asm__ volatile(
+        "lea kernel_stack + %c0(%%rip), %%rsp\n"
+        "xor %%rbp, %%rbp\n"
+        "call kernel_main\n"
+        :
+        : "i"(KERNEL_STACK_SIZE)
+        : "memory");
 }

@@ -14,6 +14,8 @@
 #define LIMINE_COMMON_MAGIC 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b
 #define LIMINE_MODULE_REQUEST_ID \
     { LIMINE_COMMON_MAGIC, 0x3e7e279702be32af, 0xca1c4f3bd1280cee }
+#define LIMINE_HHDM_REQUEST_ID \
+    { LIMINE_COMMON_MAGIC, 0x48dcf1cb8ad2b852, 0x63984e959a98244b }
 
 struct limine_file {
     uint64_t revision;
@@ -35,6 +37,17 @@ struct limine_module_request {
     struct limine_module_response *response;
     uint64_t internal_module_count;
     void *internal_modules;
+};
+
+struct limine_hhdm_response {
+    uint64_t revision;
+    uint64_t offset;
+};
+
+struct limine_hhdm_request {
+    uint64_t id[4];
+    uint64_t revision;
+    struct limine_hhdm_response *response;
 };
 
 #endif
