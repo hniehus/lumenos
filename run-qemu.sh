@@ -17,4 +17,16 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
   exit "$status"
 fi
 
+for _ in 1 2 3 4 5; do
+  if [ -f build/boot.log ]; then
+    break
+  fi
+  sleep 1
+done
+
+if [ ! -f build/boot.log ]; then
+  echo "run-qemu: boot log was not created" >&2
+  exit 1
+fi
+
 cat build/boot.log
