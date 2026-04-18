@@ -11,6 +11,8 @@
 #define ELF_TYPE_DYN 3
 #define ELF_MACHINE_X86_64 62
 #define PT_LOAD 1
+#define ROOT_TASK_IMAGE_CAPACITY (1024 * 1024)
+#define USER_ADDRESS_TOP 0x0000800000000000ULL
 
 #define USED __attribute__((used))
 #define SECTION(name) __attribute__((section(name)))
@@ -42,6 +44,16 @@ struct elf64_phdr {
     uint64_t p_memsz;
     uint64_t p_align;
 };
+
+struct root_task_image {
+    uint64_t base_vaddr;
+    uint64_t end_vaddr;
+    uint64_t entry;
+    uint64_t load_segment_count;
+    uint8_t bytes[ROOT_TASK_IMAGE_CAPACITY];
+};
+
+static struct root_task_image root_task_image;
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -108,6 +120,20 @@ static void serial_write_hex(uint64_t value) {
     buffer[18] = '\0';
 
     serial_write_string(buffer);
+}
+
+static void memory_copy(uint8_t *dst, const uint8_t *src, uint64_t len) {
+    while (len > 0) {
+        *dst++ = *src++;
+        --len;
+    }
+}
+
+static void memory_zero(uint8_t *dst, uint64_t len) {
+    while (len > 0) {
+        *dst++ = 0;
+        --len;
+    }
 }
 
 static int serial_init(void) {
@@ -265,6 +291,128 @@ static const char *validate_root_task_elf(const struct limine_file *module, uint
     return 0;
 }
 
+static int user_vaddr_plausible(uint64_t vaddr, uint64_t memsz) {
+    uint64_t end = vaddr + memsz;
+
+    if (vaddr < 0x1000) {
+        return 0;
+    }
+
+    if (end < vaddr) {
+        return 0;
+    }
+
+    if (end > USER_ADDRESS_TOP) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static const char *map_root_task_segments(const struct limine_file *module, uint64_t *entry_out) {
+    const struct elf64_ehdr *ehdr = (const struct elf64_ehdr *)module->address;
+    const struct elf64_phdr *phdrs =
+        (const struct elf64_phdr *)((const uint8_t *)module->address + ehdr->e_phoff);
+    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t max_vaddr = 0;
+    uint64_t image_size;
+    uint16_t index;
+    uint64_t load_count = 0;
+
+    for (index = 0; index < ehdr->e_phnum; ++index) {
+        const struct elf64_phdr *phdr = &phdrs[index];
+        uint64_t file_end;
+        uint64_t seg_end;
+
+        if (phdr->p_type != PT_LOAD) {
+            continue;
+        }
+
+        if (phdr->p_memsz == 0) {
+            continue;
+        }
+
+        if (phdr->p_filesz > phdr->p_memsz) {
+            return "filesz exceeds memsz";
+        }
+
+        file_end = phdr->p_offset + phdr->p_filesz;
+        if (file_end < phdr->p_offset || file_end > module->size) {
+            return "segment file range bad";
+        }
+
+        if (!user_vaddr_plausible(phdr->p_vaddr, phdr->p_memsz)) {
+            return "segment vaddr bad";
+        }
+
+        seg_end = phdr->p_vaddr + phdr->p_memsz;
+        if (phdr->p_vaddr < min_vaddr) {
+            min_vaddr = phdr->p_vaddr;
+        }
+        if (seg_end > max_vaddr) {
+            max_vaddr = seg_end;
+        }
+
+        ++load_count;
+    }
+
+    if (load_count == 0) {
+        return "no load segments";
+    }
+
+    image_size = max_vaddr - min_vaddr;
+    if (image_size > ROOT_TASK_IMAGE_CAPACITY) {
+        return "image too large";
+    }
+
+    memory_zero(root_task_image.bytes, ROOT_TASK_IMAGE_CAPACITY);
+    root_task_image.base_vaddr = min_vaddr;
+    root_task_image.end_vaddr = max_vaddr;
+    root_task_image.entry = ehdr->e_entry;
+    root_task_image.load_segment_count = load_count;
+
+    serial_write_string("kernel: root task map begin\n");
+    serial_write_string("kernel: root task load segments = ");
+    serial_write_decimal(load_count);
+    serial_write_string("\n");
+
+    load_count = 0;
+    for (index = 0; index < ehdr->e_phnum; ++index) {
+        const struct elf64_phdr *phdr = &phdrs[index];
+        uint64_t dst_offset;
+        uint8_t *dst;
+        const uint8_t *src;
+
+        if (phdr->p_type != PT_LOAD || phdr->p_memsz == 0) {
+            continue;
+        }
+
+        dst_offset = phdr->p_vaddr - min_vaddr;
+        if (dst_offset > ROOT_TASK_IMAGE_CAPACITY || phdr->p_memsz > ROOT_TASK_IMAGE_CAPACITY - dst_offset) {
+            return "segment image range bad";
+        }
+
+        dst = root_task_image.bytes + dst_offset;
+        src = (const uint8_t *)module->address + phdr->p_offset;
+
+        memory_copy(dst, src, phdr->p_filesz);
+        memory_zero(dst + phdr->p_filesz, phdr->p_memsz - phdr->p_filesz);
+
+        serial_write_string("kernel: map segment ");
+        serial_write_decimal(load_count);
+        serial_write_string(" vaddr=");
+        serial_write_hex(phdr->p_vaddr);
+        serial_write_string(" end=");
+        serial_write_hex(phdr->p_vaddr + phdr->p_memsz);
+        serial_write_string("\n");
+
+        ++load_count;
+    }
+
+    *entry_out = ehdr->e_entry;
+    return 0;
+}
+
 USED SECTION(".limine_reqs.start")
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 
@@ -328,8 +476,18 @@ __attribute__((noreturn)) void _start(void) {
     }
 
     serial_write_string("kernel: root task elf valid\n");
+    elf_error = map_root_task_segments(root_task_module, &root_task_entry);
+    if (elf_error != 0) {
+        serial_write_string("kernel: root task map failed | reason ");
+        serial_write_string(elf_error);
+        serial_write_string("\n");
+        halt_forever();
+    }
+
+    serial_write_string("kernel: root task segments mapped\n");
     serial_write_string("kernel: root task entry = ");
     serial_write_hex(root_task_entry);
     serial_write_string("\n");
+    serial_write_string("kernel: root task image ready\n");
     halt_forever();
 }
