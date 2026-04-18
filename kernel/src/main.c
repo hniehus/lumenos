@@ -13,6 +13,11 @@
 #define PT_LOAD 1
 #define ROOT_TASK_IMAGE_CAPACITY (1024 * 1024)
 #define USER_ADDRESS_TOP 0x0000800000000000ULL
+#define USER_STACK_SIZE (64 * 1024ULL)
+#define USER_STACK_TOP 0x00007fffffff0000ULL
+#define USER_RFLAGS_INITIAL 0x202ULL
+#define USER_CS_SELECTOR 0x23u
+#define USER_SS_SELECTOR 0x1bu
 
 #define USED __attribute__((used))
 #define SECTION(name) __attribute__((section(name)))
@@ -53,7 +58,38 @@ struct root_task_image {
     uint8_t bytes[ROOT_TASK_IMAGE_CAPACITY];
 };
 
+struct root_task_context {
+    uint64_t rip;
+    uint64_t rsp;
+    uint64_t rflags;
+    uint64_t rdi;
+    uint64_t rsi;
+    uint64_t rdx;
+    uint64_t rcx;
+    uint64_t r8;
+    uint64_t r9;
+    uint16_t cs;
+    uint16_t ss;
+};
+
+struct root_task_launch_frame {
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+};
+
+struct root_task_launch_state {
+    uint64_t stack_base;
+    uint64_t stack_top;
+    struct root_task_context context;
+    struct root_task_launch_frame frame;
+    uint8_t stack[USER_STACK_SIZE];
+};
+
 static struct root_task_image root_task_image;
+static struct root_task_launch_state root_task_launch_state;
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -134,6 +170,10 @@ static void memory_zero(uint8_t *dst, uint64_t len) {
         *dst++ = 0;
         --len;
     }
+}
+
+static uint64_t align_down(uint64_t value, uint64_t alignment) {
+    return value & ~(alignment - 1);
 }
 
 static int serial_init(void) {
@@ -413,6 +453,49 @@ static const char *map_root_task_segments(const struct limine_file *module, uint
     return 0;
 }
 
+static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_out) {
+    uint64_t stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    uint64_t initial_rsp;
+
+    if (USER_STACK_TOP > USER_ADDRESS_TOP) {
+        return "stack top outside user range";
+    }
+
+    if (stack_base < 0x1000 || stack_base >= USER_STACK_TOP) {
+        return "stack range invalid";
+    }
+
+    initial_rsp = align_down(USER_STACK_TOP, 16);
+    if (initial_rsp <= stack_base || initial_rsp > USER_STACK_TOP) {
+        return "stack pointer invalid";
+    }
+
+    memory_zero(root_task_launch_state.stack, USER_STACK_SIZE);
+    root_task_launch_state.stack_base = stack_base;
+    root_task_launch_state.stack_top = USER_STACK_TOP;
+
+    root_task_launch_state.context.rip = entry;
+    root_task_launch_state.context.rsp = initial_rsp;
+    root_task_launch_state.context.rflags = USER_RFLAGS_INITIAL;
+    root_task_launch_state.context.rdi = 0;
+    root_task_launch_state.context.rsi = 0;
+    root_task_launch_state.context.rdx = 0;
+    root_task_launch_state.context.rcx = 0;
+    root_task_launch_state.context.r8 = 0;
+    root_task_launch_state.context.r9 = 0;
+    root_task_launch_state.context.cs = USER_CS_SELECTOR;
+    root_task_launch_state.context.ss = USER_SS_SELECTOR;
+
+    root_task_launch_state.frame.rip = entry;
+    root_task_launch_state.frame.cs = USER_CS_SELECTOR;
+    root_task_launch_state.frame.rflags = USER_RFLAGS_INITIAL;
+    root_task_launch_state.frame.rsp = initial_rsp;
+    root_task_launch_state.frame.ss = USER_SS_SELECTOR;
+
+    *rsp_out = initial_rsp;
+    return 0;
+}
+
 USED SECTION(".limine_reqs.start")
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 
@@ -436,6 +519,7 @@ __attribute__((noreturn)) void _start(void) {
     struct limine_file *root_task_module;
     const char *elf_error;
     uint64_t root_task_entry = 0;
+    uint64_t root_task_rsp = 0;
 
     if (!serial_init()) {
         halt_forever();
@@ -489,5 +573,27 @@ __attribute__((noreturn)) void _start(void) {
     serial_write_hex(root_task_entry);
     serial_write_string("\n");
     serial_write_string("kernel: root task image ready\n");
+
+    elf_error = prepare_root_task_launch_state(root_task_entry, &root_task_rsp);
+    if (elf_error != 0) {
+        serial_write_string("kernel: root task context failed | reason ");
+        serial_write_string(elf_error);
+        serial_write_string("\n");
+        halt_forever();
+    }
+
+    serial_write_string("kernel: root task stack allocated\n");
+    serial_write_string("kernel: root task stack top = ");
+    serial_write_hex(root_task_launch_state.stack_top);
+    serial_write_string("\n");
+    serial_write_string("kernel: root task context ready\n");
+    serial_write_string("kernel: root task rip = ");
+    serial_write_hex(root_task_launch_state.context.rip);
+    serial_write_string("\n");
+    serial_write_string("kernel: root task rsp = ");
+    serial_write_hex(root_task_rsp);
+    serial_write_string("\n");
+    serial_write_string("kernel: root task launch frame prepared\n");
+    serial_write_string("kernel: root task launch state prepared\n");
     halt_forever();
 }

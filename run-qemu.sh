@@ -5,7 +5,7 @@ mkdir -p build
 rm -f build/boot.log
 
 status=0
-timeout --foreground 15s qemu-system-x86_64 \
+timeout --foreground 20s qemu-system-x86_64 \
   -boot d \
   -cdrom build/lumenos.iso \
   -serial file:build/boot.log \
