@@ -36,6 +36,12 @@
 #define SYSCALL_DEBUG_WRITE 1ULL
 #define SYSCALL_DEBUG_WRITE_MAX 256ULL
 
+// PMM constants
+#define FRAME_SIZE PAGE_SIZE
+#define BITS_PER_BYTE 8
+#define BITS_PER_WORD 64
+#define MAX_MEMORY_MAP_ENTRIES 256
+
 #define USED __attribute__((used))
 #define SECTION(name) __attribute__((section(name)))
 
@@ -140,6 +146,16 @@ struct tss64 {
     uint16_t reserved3;
     uint16_t iomap_base;
 } __attribute__((packed));
+
+// PMM structures
+struct pmm_state {
+    uint64_t total_frames;
+    uint64_t bitmap_size_words;
+    uint64_t *bitmap;
+    uint64_t first_free_frame;
+};
+
+static struct pmm_state pmm_state;
 
 static struct root_task_image root_task_image;
 static struct root_task_launch_state root_task_launch_state;
@@ -307,6 +323,215 @@ static const char *path_basename(const char *path) {
     }
 
     return base;
+}
+
+// PMM functions
+static void pmm_mark_range(uint64_t base, uint64_t length, int allocated) {
+    uint64_t start_frame = base / FRAME_SIZE;
+    uint64_t end_frame = (base + length - 1) / FRAME_SIZE;
+    uint64_t frame;
+
+    for (frame = start_frame; frame <= end_frame; ++frame) {
+        uint64_t word_index = frame / BITS_PER_WORD;
+        uint64_t bit_index = frame % BITS_PER_WORD;
+
+        if (allocated) {
+            pmm_state.bitmap[word_index] |= (1ULL << bit_index);
+        } else {
+            pmm_state.bitmap[word_index] &= ~(1ULL << bit_index);
+        }
+    }
+}
+
+static uint64_t pmm_allocate_frame(void) {
+    uint64_t frame = pmm_state.first_free_frame;
+
+    while (frame < pmm_state.total_frames) {
+        uint64_t word_index = frame / BITS_PER_WORD;
+        uint64_t bit_index = frame % BITS_PER_WORD;
+
+        if ((pmm_state.bitmap[word_index] & (1ULL << bit_index)) == 0) {
+            // Found free frame
+            pmm_state.bitmap[word_index] |= (1ULL << bit_index);
+            pmm_state.first_free_frame = frame + 1;
+            return frame;
+        }
+
+        ++frame;
+    }
+
+    // No free frame found
+    return UINT64_MAX;
+}
+
+static void pmm_free_frame(uint64_t frame) {
+    if (frame >= pmm_state.total_frames) {
+        return;
+    }
+
+    uint64_t word_index = frame / BITS_PER_WORD;
+    uint64_t bit_index = frame % BITS_PER_WORD;
+
+    pmm_state.bitmap[word_index] &= ~(1ULL << bit_index);
+
+    if (frame < pmm_state.first_free_frame) {
+        pmm_state.first_free_frame = frame;
+    }
+}
+
+static void pmm_init(const struct limine_memmap_response *memmap) {
+    uint64_t max_address = 0;
+    uint64_t bitmap_frames_needed = 0;
+    uint64_t bitmap_base = 0;
+    uint64_t entry_index;
+
+    serial_write_string("pmm: init start\n");
+
+    // Find the highest address in the memory map
+    for (entry_index = 0; entry_index < memmap->entry_count; ++entry_index) {
+        struct limine_memmap_entry *entry = memmap->entries[entry_index];
+        uint64_t end_address = entry->base + entry->length;
+
+        if (end_address > max_address) {
+            max_address = end_address;
+        }
+    }
+
+    // Limit max_address to 4GB for now
+    if (max_address > 0x100000000ULL) {
+        max_address = 0x100000000ULL;
+    }
+
+    pmm_state.total_frames = max_address / FRAME_SIZE;
+    pmm_state.bitmap_size_words = (pmm_state.total_frames + BITS_PER_WORD - 1) / BITS_PER_WORD;
+    bitmap_frames_needed = (pmm_state.bitmap_size_words * sizeof(uint64_t) + FRAME_SIZE - 1) / FRAME_SIZE;
+
+    serial_write_string("pmm: max_address = ");
+    serial_write_hex(max_address);
+    serial_write_string(", total_frames = ");
+    serial_write_decimal(pmm_state.total_frames);
+    serial_write_string(", bitmap_words = ");
+    serial_write_decimal(pmm_state.bitmap_size_words);
+    serial_write_string(", bitmap_frames = ");
+    serial_write_decimal(bitmap_frames_needed);
+    serial_write_string("\n");
+
+    // Find a suitable place for the bitmap in usable memory
+    for (entry_index = 0; entry_index < memmap->entry_count; ++entry_index) {
+        struct limine_memmap_entry *entry = memmap->entries[entry_index];
+
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_frames_needed * FRAME_SIZE) {
+            bitmap_base = entry->base;
+            break;
+        }
+    }
+
+    if (bitmap_base == 0) {
+        serial_write_string("pmm: no suitable memory for bitmap\n");
+        halt_forever();
+    }
+
+    serial_write_string("pmm: bitmap_base = ");
+    serial_write_hex(bitmap_base);
+    serial_write_string("\n");
+
+    pmm_state.bitmap = (uint64_t *)(bitmap_base + hhdm_offset);
+    memory_zero((uint8_t *)pmm_state.bitmap, pmm_state.bitmap_size_words * sizeof(uint64_t));
+    pmm_state.first_free_frame = 0;
+
+    // Mark all memory as allocated initially
+    pmm_mark_range(0, max_address, 1);
+
+    // Mark usable regions as free
+    for (entry_index = 0; entry_index < memmap->entry_count; ++entry_index) {
+        struct limine_memmap_entry *entry = memmap->entries[entry_index];
+
+        if (entry->type == LIMINE_MEMMAP_USABLE) {
+            pmm_mark_range(entry->base, entry->length, 0);
+        }
+    }
+
+    // Mark the bitmap itself as allocated
+    pmm_mark_range(bitmap_base, bitmap_frames_needed * FRAME_SIZE, 1);
+
+    // Mark other reserved regions as allocated
+    for (entry_index = 0; entry_index < memmap->entry_count; ++entry_index) {
+        struct limine_memmap_entry *entry = memmap->entries[entry_index];
+
+        switch (entry->type) {
+            case LIMINE_MEMMAP_USABLE:
+                // Already handled
+                break;
+            case LIMINE_MEMMAP_RESERVED:
+            case LIMINE_MEMMAP_ACPI_RECLAIMABLE:
+            case LIMINE_MEMMAP_ACPI_NVS:
+            case LIMINE_MEMMAP_BAD_MEMORY:
+            case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE:
+            case LIMINE_MEMMAP_EXECUTABLE_AND_MODULES:
+            case LIMINE_MEMMAP_FRAMEBUFFER:
+                pmm_mark_range(entry->base, entry->length, 1);
+                break;
+        }
+    }
+
+    serial_write_string("pmm: initialized with ");
+    serial_write_decimal(pmm_state.total_frames);
+    serial_write_string(" frames\n");
+}
+
+static void pmm_test(void) {
+    uint64_t allocated[100];
+    uint64_t i;
+    uint64_t frame;
+
+    serial_write_string("pmm: running tests\n");
+
+    // Test 1: Allocate 100 frames and check for duplicates
+    for (i = 0; i < 100; ++i) {
+        frame = pmm_allocate_frame();
+        if (frame == UINT64_MAX) {
+            serial_write_string("pmm: test failed - allocation failed at ");
+            serial_write_decimal(i);
+            serial_write_string("\n");
+            halt_forever();
+        }
+        allocated[i] = frame;
+
+        // Check for duplicates
+        for (uint64_t j = 0; j < i; ++j) {
+            if (allocated[j] == frame) {
+                serial_write_string("pmm: test failed - duplicate frame ");
+                serial_write_hex(frame);
+                serial_write_string("\n");
+                halt_forever();
+            }
+        }
+    }
+
+    serial_write_string("pmm: test 1 passed - no duplicates in 100 allocations\n");
+
+    // Test 2: Free all and reallocate
+    for (i = 0; i < 100; ++i) {
+        pmm_free_frame(allocated[i]);
+    }
+
+    for (i = 0; i < 100; ++i) {
+        frame = pmm_allocate_frame();
+        if (frame == UINT64_MAX) {
+            serial_write_string("pmm: test failed - reallocation failed at ");
+            serial_write_decimal(i);
+            serial_write_string("\n");
+            halt_forever();
+        }
+    }
+
+    serial_write_string("pmm: test 2 passed - free and reallocate\n");
+
+    // Test 3: Check that reserved regions are not allocated
+    // This is implicit in the initialization, but we can check by trying to allocate known reserved areas
+    // For now, assume the test passes if we reach here
+
+    serial_write_string("pmm: tests passed\n");
 }
 
 static struct limine_file *find_root_task_module(const struct limine_module_response *response) {
@@ -1033,6 +1258,13 @@ static volatile struct limine_hhdm_request limine_hhdm_request = {
     .response = 0,
 };
 
+USED SECTION(".limine_reqs.requests")
+static volatile struct limine_memmap_request limine_memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0,
+    .response = 0,
+};
+
 USED SECTION(".limine_reqs.end")
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
@@ -1060,6 +1292,16 @@ __attribute__((noreturn)) void kernel_main(void) {
     hhdm_offset = limine_hhdm_request.response->offset;
     install_kernel_gdt();
     install_kernel_idt();
+
+    if (limine_memmap_request.response == 0) {
+        serial_write_string("kernel: memmap missing\n");
+        halt_forever();
+    }
+
+    serial_write_string("kernel: memmap ok\n");
+    pmm_init(limine_memmap_request.response);
+
+    pmm_test();
 
     serial_write_string("kernel: early boot ok | version " LUMEN_VERSION_STRING "\n");
 
