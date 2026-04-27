@@ -8,6 +8,8 @@ ROOT_TASK := $(BUILD_DIR)/bootstrap.elf
 GENERATED_DIR := $(BUILD_DIR)/generated
 KERNEL_VERSION_H := $(GENERATED_DIR)/version.h
 KERNEL_VERSION_TXT := $(BUILD_DIR)/kernel_version.txt
+ROOT_TASK_EXTRA_CFLAGS ?=
+FAULT_ADDR ?= 0xffffffff80000000
 
 include version/version.mk
 
@@ -62,7 +64,7 @@ $(KERNEL): kernel/src/main.c kernel/include/limine.h kernel/linker.ld $(KERNEL_V
 		-I$(GENERATED_DIR) \
 		-o $(KERNEL)
 
-$(ROOT_TASK): root-task/src/main.c
+$(ROOT_TASK): FORCE root-task/src/main.c
 	@mkdir -p $(BUILD_DIR)
 	clang root-task/src/main.c \
 		-std=c23 \
@@ -79,6 +81,7 @@ $(ROOT_TASK): root-task/src/main.c
 		-fuse-ld=lld \
 		-Wall \
 		-Wextra \
+		$(ROOT_TASK_EXTRA_CFLAGS) \
 		-Wl,-m,elf_x86_64 \
 		-Wl,-e,_start \
 		-Wl,--build-id=none \
@@ -133,6 +136,11 @@ smoke: run
 	@grep -q "kernel: entering user mode" $(BOOTLOG)
 	@grep -q "user: hello lumen" $(BOOTLOG)
 	@grep -q "kernel: syscall handled" $(BOOTLOG)
+	@grep -q "kernel: user fault page" $(BOOTLOG)
+	@grep -q "kernel: user fault addr = $(FAULT_ADDR)" $(BOOTLOG)
+
+smoke-guard:
+	$(MAKE) ROOT_TASK_EXTRA_CFLAGS=-DROOT_TASK_FAULT_GUARD_PAGE FAULT_ADDR=0x00007ffffffdf010 smoke
 
 clean:
 	rm -rf $(BUILD_DIR)
