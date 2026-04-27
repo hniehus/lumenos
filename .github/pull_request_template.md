@@ -1,11 +1,9 @@
 # Pull Request
 
-Pull request description goes here.
+Your pull request description goes here.
 
 ---
- 
- @codex review using docs/review/codex-review-policy.md
+@codex review using docs/review/codex-review-policy.md
 
- ---
-
- Closes #xx
+---
+Closes #xx
