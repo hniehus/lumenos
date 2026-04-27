@@ -17,7 +17,10 @@
 #define KERNEL_STACK_SIZE (64 * 1024ULL)
 #define USER_ADDRESS_TOP 0x0000800000000000ULL
 #define USER_STACK_SIZE (64 * 1024ULL)
+#define USER_STACK_GUARD_SIZE PAGE_SIZE
+#define USER_STACK_TOTAL_SIZE (USER_STACK_SIZE + USER_STACK_GUARD_SIZE)
 #define USER_STACK_TOP 0x00007fffffff0000ULL
+#define KERNEL_ADDRESS_BASE 0xffff800000000000ULL
 #define PAGE_SIZE 0x1000ULL
 #define PAGE_PRESENT 0x001ULL
 #define PAGE_WRITABLE 0x002ULL
@@ -103,6 +106,7 @@ struct root_task_launch_frame {
 };
 
 struct root_task_launch_state {
+    uint64_t stack_guard_base;
     uint64_t stack_base;
     uint64_t stack_top;
     struct root_task_context context;
@@ -176,6 +180,12 @@ static uint64_t kernel_gdt[7] __attribute__((aligned(16))) = {
 };
 static struct tss64 kernel_tss;
 static struct idt_entry kernel_idt[256];
+
+enum user_mapping_access {
+    USER_MAPPING_READ_ONLY = 0,
+    USER_MAPPING_READ_WRITE = 1,
+    USER_MAPPING_EXECUTABLE = 2,
+};
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -323,6 +333,19 @@ static const char *path_basename(const char *path) {
     }
 
     return base;
+}
+
+static const char *user_mapping_access_name(enum user_mapping_access access) {
+    switch (access) {
+        case USER_MAPPING_READ_ONLY:
+            return "read-only";
+        case USER_MAPPING_READ_WRITE:
+            return "read-write";
+        case USER_MAPPING_EXECUTABLE:
+            return "executable";
+    }
+
+    return "unknown";
 }
 
 // PMM functions
@@ -720,7 +743,7 @@ static uint64_t translate_kernel_vaddr_to_phys(uint64_t vaddr) {
     return (pte & PAGE_ADDR_MASK) | (vaddr & 0xfffULL);
 }
 
-static const char *map_user_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
+static const char *map_page_at(uint64_t vaddr, uint64_t phys, uint64_t flags, int user_access) {
     uint64_t pml4_phys = read_cr3() & ~0xfffULL;
     uint64_t *pml4 = (uint64_t *)phys_to_hhdm(pml4_phys);
     uint64_t pml4_index = (vaddr >> 39) & 0x1ffULL;
@@ -737,40 +760,62 @@ static const char *map_user_page(uint64_t vaddr, uint64_t phys, uint64_t flags) 
         return "page alignment bad";
     }
 
-    if (pml4_index == 0) {
-        if (user_low_pdpt_phys == 0) {
-            new_table = allocate_page_table();
-            if (new_table == 0) {
-                return "page table pool exhausted";
-            }
-            user_low_pdpt_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+    if (user_access) {
+        if (!user_vaddr_plausible(vaddr, PAGE_SIZE)) {
+            return "user vaddr bad";
+        }
+
+        if (pml4_index == 0) {
             if (user_low_pdpt_phys == 0) {
-                return "page table phys missing";
+                new_table = allocate_page_table();
+                if (new_table == 0) {
+                    return "page table pool exhausted";
+                }
+                user_low_pdpt_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+                if (user_low_pdpt_phys == 0) {
+                    return "page table phys missing";
+                }
             }
-        }
-        pml4[pml4_index] = user_low_pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
-    } else if (pml4_index == 0x0ffULL) {
-        if (user_high_pdpt_phys == 0) {
+            pml4[pml4_index] = user_low_pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        } else if (pml4_index == 0x0ffULL) {
+            if (user_high_pdpt_phys == 0) {
+                new_table = allocate_page_table();
+                if (new_table == 0) {
+                    return "page table pool exhausted";
+                }
+                user_high_pdpt_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+                if (user_high_pdpt_phys == 0) {
+                    return "page table phys missing";
+                }
+            }
+            pml4[pml4_index] = user_high_pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        } else if ((pml4[pml4_index] & PAGE_PRESENT) == 0) {
             new_table = allocate_page_table();
             if (new_table == 0) {
                 return "page table pool exhausted";
             }
-            user_high_pdpt_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
-            if (user_high_pdpt_phys == 0) {
+            new_table_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+            if (new_table_phys == 0) {
                 return "page table phys missing";
             }
+            pml4[pml4_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
         }
-        pml4[pml4_index] = user_high_pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
-    } else if ((pml4[pml4_index] & PAGE_PRESENT) == 0) {
-        new_table = allocate_page_table();
-        if (new_table == 0) {
-            return "page table pool exhausted";
+    } else {
+        if (vaddr < KERNEL_ADDRESS_BASE) {
+            return "kernel vaddr bad";
         }
-        new_table_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
-        if (new_table_phys == 0) {
-            return "page table phys missing";
+
+        if ((pml4[pml4_index] & PAGE_PRESENT) == 0) {
+            new_table = allocate_page_table();
+            if (new_table == 0) {
+                return "page table pool exhausted";
+            }
+            new_table_phys = translate_kernel_vaddr_to_phys((uint64_t)new_table);
+            if (new_table_phys == 0) {
+                return "page table phys missing";
+            }
+            pml4[pml4_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE;
         }
-        pml4[pml4_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
     }
 
     pdpt = (uint64_t *)phys_to_hhdm(pml4[pml4_index] & PAGE_ADDR_MASK);
@@ -783,7 +828,7 @@ static const char *map_user_page(uint64_t vaddr, uint64_t phys, uint64_t flags) 
         if (new_table_phys == 0) {
             return "page table phys missing";
         }
-        pdpt[pdpt_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        pdpt[pdpt_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | (user_access ? PAGE_USER : 0);
     } else if ((pdpt[pdpt_index] & PAGE_HUGE) != 0) {
         return "pdpt huge page conflict";
     }
@@ -798,18 +843,39 @@ static const char *map_user_page(uint64_t vaddr, uint64_t phys, uint64_t flags) 
         if (new_table_phys == 0) {
             return "page table phys missing";
         }
-        pd[pd_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        pd[pd_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITABLE | (user_access ? PAGE_USER : 0);
     } else if ((pd[pd_index] & PAGE_HUGE) != 0) {
         return "pd huge page conflict";
     }
 
     pt = (uint64_t *)phys_to_hhdm(pd[pd_index] & PAGE_ADDR_MASK);
-    pt[pt_index] = (phys & ~0xfffULL) | PAGE_PRESENT | PAGE_USER | flags;
+    pt[pt_index] = (phys & ~0xfffULL) | PAGE_PRESENT | (user_access ? PAGE_USER : 0) | flags;
     __asm__ volatile("invlpg (%0)" : : "r"((void *)vaddr) : "memory");
     return 0;
 }
 
-static const char *map_user_range(uint64_t vaddr, uint64_t kernel_buffer, uint64_t size, uint64_t flags) {
+static const char *map_kernel_only_page(uint64_t vaddr, uint64_t phys, uint64_t flags) __attribute__((unused));
+static const char *map_kernel_only_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
+    return map_page_at(vaddr, phys, flags, 0);
+}
+
+static const char *map_user_read_only_page(uint64_t vaddr, uint64_t phys) {
+    return map_page_at(vaddr, phys, PAGE_NX, 1);
+}
+
+static const char *map_user_read_write_page(uint64_t vaddr, uint64_t phys) {
+    return map_page_at(vaddr, phys, PAGE_WRITABLE | PAGE_NX, 1);
+}
+
+static const char *map_user_executable_page(uint64_t vaddr, uint64_t phys) {
+    return map_page_at(vaddr, phys, 0, 1);
+}
+
+static const char *map_user_range_with_access(
+    uint64_t vaddr,
+    uint64_t kernel_buffer,
+    uint64_t size,
+    enum user_mapping_access access) {
     uint64_t current_vaddr = align_down(vaddr, PAGE_SIZE);
     uint64_t buffer_page = align_down(kernel_buffer, PAGE_SIZE);
     uint64_t end_vaddr = align_up(vaddr + size, PAGE_SIZE);
@@ -822,7 +888,20 @@ static const char *map_user_range(uint64_t vaddr, uint64_t kernel_buffer, uint64
             return "user backing phys missing";
         }
 
-        error = map_user_page(current_vaddr, phys, flags);
+        switch (access) {
+            case USER_MAPPING_READ_ONLY:
+                error = map_user_read_only_page(current_vaddr, phys);
+                break;
+            case USER_MAPPING_READ_WRITE:
+                error = map_user_read_write_page(current_vaddr, phys);
+                break;
+            case USER_MAPPING_EXECUTABLE:
+                error = map_user_executable_page(current_vaddr, phys);
+                break;
+            default:
+                return "user mapping access invalid";
+        }
+
         if (error != 0) {
             return error;
         }
@@ -984,14 +1063,15 @@ static const char *map_root_task_segments(const struct limine_file *module, uint
 }
 
 static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_out) {
-    uint64_t stack_base = USER_STACK_TOP - USER_STACK_SIZE;
+    uint64_t stack_guard_base = USER_STACK_TOP - USER_STACK_TOTAL_SIZE;
+    uint64_t stack_base = stack_guard_base + USER_STACK_GUARD_SIZE;
     uint64_t initial_rsp;
 
     if (USER_STACK_TOP > USER_ADDRESS_TOP) {
         return "stack top outside user range";
     }
 
-    if (stack_base < 0x1000 || stack_base >= USER_STACK_TOP) {
+    if (stack_guard_base < 0x1000 || stack_guard_base >= USER_STACK_TOP) {
         return "stack range invalid";
     }
 
@@ -1001,6 +1081,7 @@ static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_
     }
 
     memory_zero(root_task_stack_pages, USER_STACK_SIZE);
+    root_task_launch_state.stack_guard_base = stack_guard_base;
     root_task_launch_state.stack_base = stack_base;
     root_task_launch_state.stack_top = USER_STACK_TOP;
 
@@ -1034,7 +1115,7 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
 
     for (index = 0; index < ehdr->e_phnum; ++index) {
         const struct elf64_phdr *phdr = &phdrs[index];
-        uint64_t segment_flags = 0;
+        enum user_mapping_access access;
         uint64_t segment_vaddr;
         uint64_t segment_size;
         uint64_t image_offset;
@@ -1047,11 +1128,16 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
         segment_size = align_up((phdr->p_vaddr - segment_vaddr) + phdr->p_memsz, PAGE_SIZE);
         image_offset = segment_vaddr - root_task_image.base_vaddr;
 
-        if (phdr->p_flags & PF_W) {
-            segment_flags |= PAGE_WRITABLE;
+        if ((phdr->p_flags & PF_W) != 0 && (phdr->p_flags & PF_X) != 0) {
+            return "user W+X forbidden";
         }
-        if ((phdr->p_flags & PF_X) == 0) {
-            segment_flags |= PAGE_NX;
+
+        if ((phdr->p_flags & PF_W) != 0) {
+            access = USER_MAPPING_READ_WRITE;
+        } else if ((phdr->p_flags & PF_X) != 0) {
+            access = USER_MAPPING_EXECUTABLE;
+        } else {
+            access = USER_MAPPING_READ_ONLY;
         }
 
         if (image_offset > ROOT_TASK_IMAGE_CAPACITY || segment_size > ROOT_TASK_IMAGE_CAPACITY - image_offset) {
@@ -1062,12 +1148,16 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
             return "user image vaddr bad";
         }
 
+        serial_write_string("kernel: user segment map ");
+        serial_write_string(user_mapping_access_name(access));
+        serial_write_string("\n");
+
         {
-            const char *error = map_user_range(
+            const char *error = map_user_range_with_access(
                 segment_vaddr,
                 (uint64_t)(root_task_image_pages + image_offset),
                 segment_size,
-                segment_flags);
+                access);
             if (error != 0) {
                 return error;
             }
@@ -1079,11 +1169,11 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
     }
 
     {
-        const char *error = map_user_range(
-        root_task_launch_state.stack_base,
-        (uint64_t)root_task_stack_pages,
-        USER_STACK_SIZE,
-        PAGE_WRITABLE);
+        const char *error = map_user_range_with_access(
+            root_task_launch_state.stack_base,
+            (uint64_t)root_task_stack_pages,
+            USER_STACK_SIZE,
+            USER_MAPPING_READ_WRITE);
         if (error != 0) {
             return error;
         }
@@ -1164,8 +1254,14 @@ __attribute__((noreturn)) void handle_user_general_protection(uint64_t error_cod
     halt_forever();
 }
 
-__attribute__((noreturn)) void handle_user_page_fault(void) {
+__attribute__((noreturn)) void handle_user_page_fault(uint64_t fault_address, uint64_t error_code) {
     serial_write_string("kernel: user fault page\n");
+    serial_write_string("kernel: user fault addr = ");
+    serial_write_hex(fault_address);
+    serial_write_string("\n");
+    serial_write_string("kernel: user fault code = ");
+    serial_write_hex(error_code);
+    serial_write_string("\n");
     halt_forever();
 }
 
@@ -1184,7 +1280,8 @@ __attribute__((naked)) void user_general_protection_stub(void) {
 
 __attribute__((naked)) void user_page_fault_stub(void) {
     __asm__ volatile(
-        "addq $8, %rsp\n"
+        "movq %cr2, %rdi\n"
+        "popq %rsi\n"
         "cld\n"
         "call handle_user_page_fault\n");
 }
@@ -1356,6 +1453,12 @@ __attribute__((noreturn)) void kernel_main(void) {
     }
 
     serial_write_string("kernel: root task stack allocated\n");
+    serial_write_string("kernel: root task stack guard base = ");
+    serial_write_hex(root_task_launch_state.stack_guard_base);
+    serial_write_string("\n");
+    serial_write_string("kernel: root task stack base = ");
+    serial_write_hex(root_task_launch_state.stack_base);
+    serial_write_string("\n");
     serial_write_string("kernel: root task stack top = ");
     serial_write_hex(root_task_launch_state.stack_top);
     serial_write_string("\n");

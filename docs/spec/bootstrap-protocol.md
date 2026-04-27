@@ -110,24 +110,37 @@ The kernel creates the first userspace address space and maps only the minimum r
    - executable segments mapped RX
    - read-only data mapped R
    - writable data/BSS mapped RW
+   - writable+executable user pages are invalid
 
 2. initial user stack  
    - mapped RW
    - at least one guard page
    - initial size implementation-defined for bring-up
    - recommended initial size: 64 KiB
+   - the guard page remains unmapped and must fault on access
 
 3. BootInfo mapping  
    - mapped read-only
    - present at entry
    - virtual address passed in a register at task entry
 
-### 5.2 Optional mappings
+### 5.2 Mapping rules
+
+The kernel must expose explicit mapping classes rather than a generic ambient mapping model.
+
+- kernel-only mappings are never tagged user-accessible
+- user mappings are created as read-only, read-write, or executable
+- user read-write mappings must not also be executable
+- user access to kernel-only pages must fault
+- the initial user stack is a bounded mapping with an unmapped guard page
+- BootInfo remains read-only for the first task
+
+### 5.3 Optional mappings
 
 - optional read-only mappings for boot modules are allowed
 - default preference: boot modules are passed as `VMO` capabilities and mapped by userspace explicitly
 
-### 5.3 Hard rules
+### 5.4 Hard rules
 
 - kernel memory is not mapped into userspace
 - no direct identity map of physical memory is exposed to the first task
