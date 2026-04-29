@@ -33,7 +33,7 @@ jobs:
       - name: Install deps (minimal)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential clang llvm lld nasm qemu-system-x86 ovmf make
+          sudo apt-get install -y xorriso build-essential clang llvm lld nasm qemu-system-x86 ovmf make
 
       - name: Nightly build
         run: |
