@@ -79,6 +79,8 @@ Treat boot and bootstrap as explicit contracts, not as ad-hoc glue.
 
 ## Default way of working
 
+**BEFORE** you start, ask the user whether or not to create a branch, which branch (feature/fix/release) and propose a branch name.
+
 For every non-trivial task:
 
 1. Understand the goal, constraints, and affected area.
