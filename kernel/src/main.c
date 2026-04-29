@@ -1259,8 +1259,29 @@ static const char *vmo_release(struct vmo *vmo) {
     return 0;
 }
 
+static const char *choose_vmo_self_test_vaddr(uint64_t *vaddr_out) {
+    uint64_t candidate = align_up(root_task_image.end_vaddr + (16 * PAGE_SIZE), PAGE_SIZE);
+    uint64_t limit = root_task_launch_state.stack_base;
+
+    if (candidate < 0x1000) {
+        return "self-test vaddr bad";
+    }
+
+    if (candidate + PAGE_SIZE > limit) {
+        candidate = align_down(limit - (2 * PAGE_SIZE), PAGE_SIZE);
+    }
+
+    if (candidate < root_task_image.end_vaddr || candidate + PAGE_SIZE > root_task_launch_state.stack_base) {
+        return "self-test vaddr collides";
+    }
+
+    *vaddr_out = candidate;
+    return 0;
+}
+
 static const char *run_vmo_self_test(void) {
     const char *error;
+    uint64_t self_test_vaddr = 0;
 
     memory_zero(vmo_test_pages, PAGE_SIZE);
     memory_zero(vmo_test_peer_pages, PAGE_SIZE);
@@ -1277,10 +1298,15 @@ static const char *run_vmo_self_test(void) {
         PAGE_SIZE,
         VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
 
+    error = choose_vmo_self_test_vaddr(&self_test_vaddr);
+    if (error != 0) {
+        return error;
+    }
+
     error = vmo_map_range(
         &vmo_test_vmo,
         &root_task_address_space,
-        0x0000000000400000ULL,
+        self_test_vaddr,
         PAGE_SIZE,
         0,
         USER_MAPPING_READ_WRITE);
@@ -1291,7 +1317,7 @@ static const char *run_vmo_self_test(void) {
     error = vmo_map_range(
         &vmo_test_peer_vmo,
         &root_task_address_space,
-        0x0000000000400000ULL,
+        self_test_vaddr,
         PAGE_SIZE,
         0,
         USER_MAPPING_READ_WRITE);
@@ -1301,7 +1327,7 @@ static const char *run_vmo_self_test(void) {
 
     serial_write_string("vmo: cross-vmo overlap rejected\n");
 
-    error = vmo_unmap_range(&vmo_test_vmo, &root_task_address_space, 0x0000000000400000ULL, PAGE_SIZE, 0);
+    error = vmo_unmap_range(&vmo_test_vmo, &root_task_address_space, self_test_vaddr, PAGE_SIZE, 0);
     if (error != 0) {
         return error;
     }
