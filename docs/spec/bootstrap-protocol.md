@@ -291,9 +291,12 @@ Slots `16..63` may contain one or more `BOOT_MEMORY_VMO` capabilities.
 
 Properties:
 
+- each VMO is a distinct kernel object with identity, size, rights, and lifecycle
 - each represents a controlled memory object seeded by the kernel
 - together they form the initial userspace memory authority
 - they are the basis for early allocator/pager/resource-manager setup
+- mappings are explicit and recorded by the kernel
+- create/map/unmap/drop events should be observable through kernel logs or tracepoints
 
 Allowed rights:
 

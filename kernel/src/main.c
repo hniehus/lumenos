@@ -38,6 +38,12 @@
 #define SYSCALL_VECTOR 0x80u
 #define SYSCALL_DEBUG_WRITE 1ULL
 #define SYSCALL_DEBUG_WRITE_MAX 256ULL
+#define VMO_MAX_MAPPINGS 16
+#define VMO_RIGHT_READ (1ULL << 0)
+#define VMO_RIGHT_WRITE (1ULL << 1)
+#define VMO_RIGHT_EXECUTE (1ULL << 2)
+#define VMO_RIGHT_MAP (1ULL << 3)
+#define VMO_RIGHT_DUPLICATE (1ULL << 4)
 
 // PMM constants
 #define FRAME_SIZE PAGE_SIZE
@@ -166,11 +172,13 @@ static struct root_task_launch_state root_task_launch_state;
 uint8_t kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(16)));
 static uint8_t root_task_image_pages[ROOT_TASK_IMAGE_CAPACITY] __attribute__((aligned(PAGE_SIZE)));
 static uint8_t root_task_stack_pages[USER_STACK_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static uint8_t vmo_test_pages[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static uint8_t page_table_pool[PAGE_TABLE_POOL_PAGES][PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t page_table_pool_used = 0;
 static uint64_t hhdm_offset = 0;
 static uint64_t user_low_pdpt_phys = 0;
 static uint64_t user_high_pdpt_phys = 0;
+static uint64_t next_vmo_id = 1;
 static uint64_t kernel_gdt[7] __attribute__((aligned(16))) = {
     0x0000000000000000ULL,
     0x00af9a000000ffffULL,
@@ -186,6 +194,41 @@ enum user_mapping_access {
     USER_MAPPING_READ_WRITE = 1,
     USER_MAPPING_EXECUTABLE = 2,
 };
+
+struct address_space {
+    uint64_t id;
+    const char *name;
+    uint64_t mapping_count;
+};
+
+struct vmo_mapping_record {
+    uint64_t address_space_id;
+    uint64_t vaddr;
+    uint64_t size;
+    uint64_t offset;
+    enum user_mapping_access access;
+    int active;
+};
+
+struct vmo {
+    uint64_t id;
+    uint64_t size;
+    uint64_t rights_mask;
+    uint64_t refcount;
+    uint64_t mapping_count;
+    const char *name;
+    uint8_t *backing;
+    struct vmo_mapping_record mappings[VMO_MAX_MAPPINGS];
+};
+
+static struct address_space root_task_address_space = {
+    .id = 1,
+    .name = "root-task-as",
+    .mapping_count = 0,
+};
+static struct vmo root_task_image_vmo;
+static struct vmo root_task_stack_vmo;
+static struct vmo vmo_test_vmo;
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -346,6 +389,109 @@ static const char *user_mapping_access_name(enum user_mapping_access access) {
     }
 
     return "unknown";
+}
+
+static uint64_t vmo_allocate_id(void) {
+    return next_vmo_id++;
+}
+
+static int ranges_overlap(uint64_t left_base, uint64_t left_size, uint64_t right_base, uint64_t right_size) {
+    uint64_t left_end = left_base + left_size;
+    uint64_t right_end = right_base + right_size;
+
+    if (left_end < left_base || right_end < right_base) {
+        return 1;
+    }
+
+    return left_base < right_end && right_base < left_end;
+}
+
+static void vmo_log_create(const struct vmo *vmo) {
+    serial_write_string("vmo: create id=");
+    serial_write_decimal(vmo->id);
+    serial_write_string(" size=");
+    serial_write_hex(vmo->size);
+    serial_write_string(" rights=");
+    serial_write_hex(vmo->rights_mask);
+    serial_write_string("\n");
+}
+
+static void vmo_log_map(const struct vmo *vmo, const struct address_space *as, uint64_t vaddr, uint64_t size) {
+    serial_write_string("vmo: map id=");
+    serial_write_decimal(vmo->id);
+    serial_write_string(" as=");
+    serial_write_decimal(as->id);
+    serial_write_string(" vaddr=");
+    serial_write_hex(vaddr);
+    serial_write_string(" size=");
+    serial_write_hex(size);
+    serial_write_string("\n");
+}
+
+static void vmo_log_unmap(const struct vmo *vmo, const struct address_space *as, uint64_t vaddr, uint64_t size) {
+    serial_write_string("vmo: unmap id=");
+    serial_write_decimal(vmo->id);
+    serial_write_string(" as=");
+    serial_write_decimal(as->id);
+    serial_write_string(" vaddr=");
+    serial_write_hex(vaddr);
+    serial_write_string(" size=");
+    serial_write_hex(size);
+    serial_write_string("\n");
+}
+
+static void vmo_log_drop(const struct vmo *vmo) {
+    serial_write_string("vmo: drop id=");
+    serial_write_decimal(vmo->id);
+    serial_write_string("\n");
+}
+
+static void vmo_init(struct vmo *vmo, const char *name, uint8_t *backing, uint64_t size, uint64_t rights_mask) {
+    memory_zero((uint8_t *)vmo, sizeof(*vmo));
+    vmo->id = vmo_allocate_id();
+    vmo->size = size;
+    vmo->rights_mask = rights_mask;
+    vmo->refcount = 1;
+    vmo->mapping_count = 0;
+    vmo->name = name;
+    vmo->backing = backing;
+    vmo_log_create(vmo);
+}
+
+static int vmo_find_exact_mapping(const struct vmo *vmo, uint64_t address_space_id, uint64_t vaddr, uint64_t size) {
+    uint64_t index;
+
+    for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
+        const struct vmo_mapping_record *record = &vmo->mappings[index];
+
+        if (!record->active) {
+            continue;
+        }
+
+        if (record->address_space_id == address_space_id && record->vaddr == vaddr && record->size == size) {
+            return (int)index;
+        }
+    }
+
+    return -1;
+}
+
+static int vmo_has_overlap(const struct vmo *vmo, uint64_t address_space_id, uint64_t vaddr, uint64_t size) {
+    uint64_t index;
+
+    for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
+        const struct vmo_mapping_record *record = &vmo->mappings[index];
+
+        if (!record->active || record->address_space_id != address_space_id) {
+            continue;
+        }
+
+        if (ranges_overlap(record->vaddr, record->size, vaddr, size)) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 // PMM functions
@@ -871,21 +1017,119 @@ static const char *map_user_executable_page(uint64_t vaddr, uint64_t phys) {
     return map_page_at(vaddr, phys, 0, 1);
 }
 
-static const char *map_user_range_with_access(
-    uint64_t vaddr,
-    uint64_t kernel_buffer,
-    uint64_t size,
-    enum user_mapping_access access) {
-    uint64_t current_vaddr = align_down(vaddr, PAGE_SIZE);
-    uint64_t buffer_page = align_down(kernel_buffer, PAGE_SIZE);
-    uint64_t end_vaddr = align_up(vaddr + size, PAGE_SIZE);
+static const char *unmap_user_page(uint64_t vaddr) {
+    uint64_t pml4_phys = read_cr3() & ~0xfffULL;
+    uint64_t *pml4 = (uint64_t *)phys_to_hhdm(pml4_phys);
+    uint64_t pml4_index = (vaddr >> 39) & 0x1ffULL;
+    uint64_t pdpt_index = (vaddr >> 30) & 0x1ffULL;
+    uint64_t pd_index = (vaddr >> 21) & 0x1ffULL;
+    uint64_t pt_index = (vaddr >> 12) & 0x1ffULL;
+    uint64_t *pdpt;
+    uint64_t *pd;
+    uint64_t *pt;
 
-    while (current_vaddr < end_vaddr) {
-        uint64_t phys = translate_kernel_vaddr_to_phys(buffer_page);
-        const char *error;
+    if ((vaddr & (PAGE_SIZE - 1)) != 0) {
+        return "page alignment bad";
+    }
+
+    if ((pml4[pml4_index] & PAGE_PRESENT) == 0) {
+        return "page table missing";
+    }
+
+    pdpt = (uint64_t *)phys_to_hhdm(pml4[pml4_index] & PAGE_ADDR_MASK);
+    if ((pdpt[pdpt_index] & PAGE_PRESENT) == 0 || (pdpt[pdpt_index] & PAGE_HUGE) != 0) {
+        return "pdpt mapping missing";
+    }
+
+    pd = (uint64_t *)phys_to_hhdm(pdpt[pdpt_index] & PAGE_ADDR_MASK);
+    if ((pd[pd_index] & PAGE_PRESENT) == 0 || (pd[pd_index] & PAGE_HUGE) != 0) {
+        return "pd mapping missing";
+    }
+
+    pt = (uint64_t *)phys_to_hhdm(pd[pd_index] & PAGE_ADDR_MASK);
+    if ((pt[pt_index] & PAGE_PRESENT) == 0) {
+        return "pte missing";
+    }
+
+    pt[pt_index] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"((void *)vaddr) : "memory");
+    return 0;
+}
+
+static const char *vmo_map_range(
+    struct vmo *vmo,
+    struct address_space *as,
+    uint64_t vaddr,
+    uint64_t size,
+    uint64_t offset,
+    enum user_mapping_access access) {
+    uint64_t current_vaddr;
+    uint64_t current_offset;
+    uint64_t end_offset;
+    uint64_t mapped_pages = 0;
+    uint64_t record_index;
+    uint64_t index;
+    const char *error;
+
+    if ((vmo->rights_mask & VMO_RIGHT_MAP) == 0) {
+        return "vmo map right missing";
+    }
+
+    if (access == USER_MAPPING_READ_ONLY && (vmo->rights_mask & VMO_RIGHT_READ) == 0) {
+        return "vmo read right missing";
+    }
+
+    if (access == USER_MAPPING_READ_WRITE
+        && ((vmo->rights_mask & VMO_RIGHT_READ) == 0 || (vmo->rights_mask & VMO_RIGHT_WRITE) == 0)) {
+        return "vmo write right missing";
+    }
+
+    if (access == USER_MAPPING_EXECUTABLE && (vmo->rights_mask & VMO_RIGHT_EXECUTE) == 0) {
+        return "vmo execute right missing";
+    }
+
+    if (offset > vmo->size || size > vmo->size - offset) {
+        return "vmo range bad";
+    }
+
+    if (size == 0) {
+        return "vmo size bad";
+    }
+
+    if ((vaddr & (PAGE_SIZE - 1)) != 0 || (offset & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) {
+        return "vmo alignment bad";
+    }
+
+    if (!user_vaddr_plausible(vaddr, size)) {
+        return "vmo vaddr bad";
+    }
+
+    if (vmo_has_overlap(vmo, as->id, vaddr, size)) {
+        return "vmo map overlap";
+    }
+
+    record_index = UINT64_MAX;
+    for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
+        if (!vmo->mappings[index].active) {
+            record_index = index;
+            break;
+        }
+    }
+
+    if (record_index == UINT64_MAX) {
+        return "vmo mapping table full";
+    }
+
+    current_vaddr = vaddr;
+    current_offset = offset;
+    end_offset = offset + size;
+
+    while (current_offset < end_offset) {
+        uint64_t phys = translate_kernel_vaddr_to_phys((uint64_t)(vmo->backing + current_offset));
 
         if (phys == 0) {
-            return "user backing phys missing";
+            error = "vmo backing phys missing";
+            goto rollback;
         }
 
         switch (access) {
@@ -899,15 +1143,144 @@ static const char *map_user_range_with_access(
                 error = map_user_executable_page(current_vaddr, phys);
                 break;
             default:
-                return "user mapping access invalid";
+                error = "user mapping access invalid";
+                break;
         }
 
+        if (error != 0) {
+            goto rollback;
+        }
+
+        ++mapped_pages;
+        current_vaddr += PAGE_SIZE;
+        current_offset += PAGE_SIZE;
+    }
+
+    vmo->mappings[record_index].address_space_id = as->id;
+    vmo->mappings[record_index].vaddr = vaddr;
+    vmo->mappings[record_index].size = size;
+    vmo->mappings[record_index].offset = offset;
+    vmo->mappings[record_index].access = access;
+    vmo->mappings[record_index].active = 1;
+    ++vmo->mapping_count;
+    ++vmo->refcount;
+    ++as->mapping_count;
+    vmo_log_map(vmo, as, vaddr, size);
+    return 0;
+
+rollback:
+    while (mapped_pages > 0) {
+        --mapped_pages;
+        error = unmap_user_page(vaddr + (mapped_pages * PAGE_SIZE));
+        if (error != 0) {
+            return error;
+        }
+    }
+
+    return error;
+}
+
+static const char *vmo_unmap_range(
+    struct vmo *vmo,
+    struct address_space *as,
+    uint64_t vaddr,
+    uint64_t size,
+    uint64_t offset) {
+    int record_index;
+    uint64_t current_vaddr;
+    uint64_t current_offset;
+
+    record_index = vmo_find_exact_mapping(vmo, as->id, vaddr, size);
+    if (record_index < 0) {
+        return "vmo mapping missing";
+    }
+
+    if (vmo->mappings[(uint64_t)record_index].offset != offset) {
+        return "vmo mapping offset mismatch";
+    }
+
+    current_vaddr = align_down(vaddr, PAGE_SIZE);
+    current_offset = align_down(offset, PAGE_SIZE);
+    while (current_offset < align_up(offset + size, PAGE_SIZE)) {
+        const char *error = unmap_user_page(current_vaddr);
         if (error != 0) {
             return error;
         }
 
         current_vaddr += PAGE_SIZE;
-        buffer_page += PAGE_SIZE;
+        current_offset += PAGE_SIZE;
+    }
+
+    vmo->mappings[(uint64_t)record_index].active = 0;
+    vmo->mapping_count -= 1;
+    vmo->refcount -= 1;
+    if (as->mapping_count > 0) {
+        as->mapping_count -= 1;
+    }
+    vmo_log_unmap(vmo, as, vaddr, size);
+    return 0;
+}
+
+static const char *vmo_release(struct vmo *vmo) {
+    if (vmo->refcount == 0) {
+        return "vmo refcount underflow";
+    }
+
+    if (vmo->mapping_count != 0) {
+        return "vmo still mapped";
+    }
+
+    --vmo->refcount;
+    if (vmo->refcount == 0) {
+        vmo_log_drop(vmo);
+    }
+
+    return 0;
+}
+
+static const char *run_vmo_self_test(void) {
+    const char *error;
+
+    memory_zero(vmo_test_pages, PAGE_SIZE);
+    vmo_init(
+        &vmo_test_vmo,
+        "self-test-vmo",
+        vmo_test_pages,
+        PAGE_SIZE,
+        VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
+
+    error = vmo_map_range(
+        &vmo_test_vmo,
+        &root_task_address_space,
+        0x0000000000400000ULL,
+        PAGE_SIZE,
+        0,
+        USER_MAPPING_READ_WRITE);
+    if (error != 0) {
+        return error;
+    }
+
+    error = vmo_map_range(
+        &vmo_test_vmo,
+        &root_task_address_space,
+        0x0000000000400000ULL,
+        PAGE_SIZE,
+        0,
+        USER_MAPPING_READ_WRITE);
+    if (error == 0) {
+        return "vmo duplicate map allowed";
+    }
+
+    serial_write_string("vmo: duplicate map rejected\n");
+
+    error = vmo_unmap_range(&vmo_test_vmo, &root_task_address_space, 0x0000000000400000ULL, PAGE_SIZE, 0);
+    if (error != 0) {
+        return error;
+    }
+
+    error = vmo_release(&vmo_test_vmo);
+    if (error != 0) {
+        return error;
     }
 
     return 0;
@@ -1081,6 +1454,12 @@ static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_
     }
 
     memory_zero(root_task_stack_pages, USER_STACK_SIZE);
+    vmo_init(
+        &root_task_stack_vmo,
+        "root-task-stack",
+        root_task_stack_pages,
+        USER_STACK_SIZE,
+        VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
     root_task_launch_state.stack_guard_base = stack_guard_base;
     root_task_launch_state.stack_base = stack_base;
     root_task_launch_state.stack_top = USER_STACK_TOP;
@@ -1112,6 +1491,14 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
     const struct elf64_phdr *phdrs =
         (const struct elf64_phdr *)((const uint8_t *)module->address + ehdr->e_phoff);
     uint16_t index;
+    const char *error;
+
+    vmo_init(
+        &root_task_image_vmo,
+        "root-task-image",
+        root_task_image_pages,
+        ROOT_TASK_IMAGE_CAPACITY,
+        VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_EXECUTE | VMO_RIGHT_MAP | VMO_RIGHT_DUPLICATE);
 
     for (index = 0; index < ehdr->e_phnum; ++index) {
         const struct elf64_phdr *phdr = &phdrs[index];
@@ -1152,15 +1539,15 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
         serial_write_string(user_mapping_access_name(access));
         serial_write_string("\n");
 
-        {
-            const char *error = map_user_range_with_access(
-                segment_vaddr,
-                (uint64_t)(root_task_image_pages + image_offset),
-                segment_size,
-                access);
-            if (error != 0) {
-                return error;
-            }
+        error = vmo_map_range(
+            &root_task_image_vmo,
+            &root_task_address_space,
+            segment_vaddr,
+            segment_size,
+            image_offset,
+            access);
+        if (error != 0) {
+            return error;
         }
     }
 
@@ -1168,15 +1555,20 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
         return "user stack vaddr bad";
     }
 
-    {
-        const char *error = map_user_range_with_access(
-            root_task_launch_state.stack_base,
-            (uint64_t)root_task_stack_pages,
-            USER_STACK_SIZE,
-            USER_MAPPING_READ_WRITE);
-        if (error != 0) {
-            return error;
-        }
+    error = vmo_map_range(
+        &root_task_stack_vmo,
+        &root_task_address_space,
+        root_task_launch_state.stack_base,
+        USER_STACK_SIZE,
+        0,
+        USER_MAPPING_READ_WRITE);
+    if (error != 0) {
+        return error;
+    }
+
+    error = run_vmo_self_test();
+    if (error != 0) {
+        return error;
     }
 
     return 0;
