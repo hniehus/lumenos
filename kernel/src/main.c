@@ -173,6 +173,7 @@ uint8_t kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(16)));
 static uint8_t root_task_image_pages[ROOT_TASK_IMAGE_CAPACITY] __attribute__((aligned(PAGE_SIZE)));
 static uint8_t root_task_stack_pages[USER_STACK_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static uint8_t vmo_test_pages[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static uint8_t vmo_test_peer_pages[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static uint8_t page_table_pool[PAGE_TABLE_POOL_PAGES][PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t page_table_pool_used = 0;
 static uint64_t hhdm_offset = 0;
@@ -195,19 +196,23 @@ enum user_mapping_access {
     USER_MAPPING_EXECUTABLE = 2,
 };
 
-struct address_space {
-    uint64_t id;
-    const char *name;
-    uint64_t mapping_count;
-};
+struct vmo;
 
 struct vmo_mapping_record {
     uint64_t address_space_id;
+    struct vmo *vmo;
     uint64_t vaddr;
     uint64_t size;
     uint64_t offset;
     enum user_mapping_access access;
     int active;
+};
+
+struct address_space {
+    uint64_t id;
+    const char *name;
+    uint64_t mapping_count;
+    struct vmo_mapping_record mappings[VMO_MAX_MAPPINGS];
 };
 
 struct vmo {
@@ -229,6 +234,7 @@ static struct address_space root_task_address_space = {
 static struct vmo root_task_image_vmo;
 static struct vmo root_task_stack_vmo;
 static struct vmo vmo_test_vmo;
+static struct vmo vmo_test_peer_vmo;
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -458,31 +464,13 @@ static void vmo_init(struct vmo *vmo, const char *name, uint8_t *backing, uint64
     vmo_log_create(vmo);
 }
 
-static int vmo_find_exact_mapping(const struct vmo *vmo, uint64_t address_space_id, uint64_t vaddr, uint64_t size) {
+static int address_space_has_overlap(const struct address_space *as, uint64_t vaddr, uint64_t size) {
     uint64_t index;
 
     for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
-        const struct vmo_mapping_record *record = &vmo->mappings[index];
+        const struct vmo_mapping_record *record = &as->mappings[index];
 
         if (!record->active) {
-            continue;
-        }
-
-        if (record->address_space_id == address_space_id && record->vaddr == vaddr && record->size == size) {
-            return (int)index;
-        }
-    }
-
-    return -1;
-}
-
-static int vmo_has_overlap(const struct vmo *vmo, uint64_t address_space_id, uint64_t vaddr, uint64_t size) {
-    uint64_t index;
-
-    for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
-        const struct vmo_mapping_record *record = &vmo->mappings[index];
-
-        if (!record->active || record->address_space_id != address_space_id) {
             continue;
         }
 
@@ -492,6 +480,24 @@ static int vmo_has_overlap(const struct vmo *vmo, uint64_t address_space_id, uin
     }
 
     return 0;
+}
+
+static int address_space_find_exact_mapping(const struct address_space *as, uint64_t vaddr, uint64_t size) {
+    uint64_t index;
+
+    for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
+        const struct vmo_mapping_record *record = &as->mappings[index];
+
+        if (!record->active) {
+            continue;
+        }
+
+        if (record->vaddr == vaddr && record->size == size) {
+            return (int)index;
+        }
+    }
+
+    return -1;
 }
 
 // PMM functions
@@ -1104,13 +1110,13 @@ static const char *vmo_map_range(
         return "vmo vaddr bad";
     }
 
-    if (vmo_has_overlap(vmo, as->id, vaddr, size)) {
+    if (address_space_has_overlap(as, vaddr, size)) {
         return "vmo map overlap";
     }
 
     record_index = UINT64_MAX;
     for (index = 0; index < VMO_MAX_MAPPINGS; ++index) {
-        if (!vmo->mappings[index].active) {
+        if (!as->mappings[index].active) {
             record_index = index;
             break;
         }
@@ -1156,7 +1162,15 @@ static const char *vmo_map_range(
         current_offset += PAGE_SIZE;
     }
 
+    as->mappings[record_index].address_space_id = as->id;
+    as->mappings[record_index].vmo = vmo;
+    as->mappings[record_index].vaddr = vaddr;
+    as->mappings[record_index].size = size;
+    as->mappings[record_index].offset = offset;
+    as->mappings[record_index].access = access;
+    as->mappings[record_index].active = 1;
     vmo->mappings[record_index].address_space_id = as->id;
+    vmo->mappings[record_index].vmo = vmo;
     vmo->mappings[record_index].vaddr = vaddr;
     vmo->mappings[record_index].size = size;
     vmo->mappings[record_index].offset = offset;
@@ -1190,13 +1204,17 @@ static const char *vmo_unmap_range(
     uint64_t current_vaddr;
     uint64_t current_offset;
 
-    record_index = vmo_find_exact_mapping(vmo, as->id, vaddr, size);
+    record_index = address_space_find_exact_mapping(as, vaddr, size);
     if (record_index < 0) {
         return "vmo mapping missing";
     }
 
-    if (vmo->mappings[(uint64_t)record_index].offset != offset) {
+    if (as->mappings[(uint64_t)record_index].offset != offset) {
         return "vmo mapping offset mismatch";
+    }
+
+    if (as->mappings[(uint64_t)record_index].vmo != vmo) {
+        return "vmo mapping owner mismatch";
     }
 
     current_vaddr = align_down(vaddr, PAGE_SIZE);
@@ -1211,7 +1229,10 @@ static const char *vmo_unmap_range(
         current_offset += PAGE_SIZE;
     }
 
+    as->mappings[(uint64_t)record_index].active = 0;
+    as->mappings[(uint64_t)record_index].vmo = 0;
     vmo->mappings[(uint64_t)record_index].active = 0;
+    vmo->mappings[(uint64_t)record_index].vmo = 0;
     vmo->mapping_count -= 1;
     vmo->refcount -= 1;
     if (as->mapping_count > 0) {
@@ -1242,10 +1263,17 @@ static const char *run_vmo_self_test(void) {
     const char *error;
 
     memory_zero(vmo_test_pages, PAGE_SIZE);
+    memory_zero(vmo_test_peer_pages, PAGE_SIZE);
     vmo_init(
         &vmo_test_vmo,
         "self-test-vmo",
         vmo_test_pages,
+        PAGE_SIZE,
+        VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
+    vmo_init(
+        &vmo_test_peer_vmo,
+        "self-test-peer-vmo",
+        vmo_test_peer_pages,
         PAGE_SIZE,
         VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
 
@@ -1261,17 +1289,17 @@ static const char *run_vmo_self_test(void) {
     }
 
     error = vmo_map_range(
-        &vmo_test_vmo,
+        &vmo_test_peer_vmo,
         &root_task_address_space,
         0x0000000000400000ULL,
         PAGE_SIZE,
         0,
         USER_MAPPING_READ_WRITE);
     if (error == 0) {
-        return "vmo duplicate map allowed";
+        return "vmo cross overlap allowed";
     }
 
-    serial_write_string("vmo: duplicate map rejected\n");
+    serial_write_string("vmo: cross-vmo overlap rejected\n");
 
     error = vmo_unmap_range(&vmo_test_vmo, &root_task_address_space, 0x0000000000400000ULL, PAGE_SIZE, 0);
     if (error != 0) {
@@ -1279,6 +1307,11 @@ static const char *run_vmo_self_test(void) {
     }
 
     error = vmo_release(&vmo_test_vmo);
+    if (error != 0) {
+        return error;
+    }
+
+    error = vmo_release(&vmo_test_peer_vmo);
     if (error != 0) {
         return error;
     }

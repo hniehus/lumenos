@@ -14,7 +14,7 @@ The kernel now models memory as:
 
 The existing root-task bring-up path now uses VMOs for the prepared image and
 stack, and a boot-time self-test exercises duplicate-mapping rejection and
-unmapping cleanup before entering user mode.
+cross-VMO overlap rejection plus unmapping cleanup before entering user mode.
 
 ## Changes
 
@@ -24,7 +24,8 @@ unmapping cleanup before entering user mode.
 - map the initial user stack through a stack VMO with a guard page below it
 - add a boot self-test that:
   - maps a new VMO
-  - rejects a duplicate overlapping mapping into the same address space
+  - rejects an overlapping mapping from a different VMO into the same address
+    space
   - unmaps the VMO
   - releases the final reference and logs drop
 - keep the existing user fault proof for kernel-address access
@@ -37,7 +38,7 @@ vmo: create id=1 size=0x...
 vmo: create id=2 size=0x...
 vmo: map id=2 as=1 vaddr=0x...
 vmo: create id=3 size=0x...
-vmo: duplicate map rejected
+vmo: cross-vmo overlap rejected
 vmo: unmap id=3 as=1 vaddr=0x...
 vmo: drop id=3
 kernel: entering user mode

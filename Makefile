@@ -138,7 +138,7 @@ smoke: run
 	@grep -q "kernel: syscall handled" $(BOOTLOG)
 	@grep -q "vmo: create id=" $(BOOTLOG)
 	@grep -q "vmo: map id=" $(BOOTLOG)
-	@grep -q "vmo: duplicate map rejected" $(BOOTLOG)
+	@grep -q "vmo: cross-vmo overlap rejected" $(BOOTLOG)
 	@grep -q "vmo: unmap id=" $(BOOTLOG)
 	@grep -q "vmo: drop id=" $(BOOTLOG)
 	@grep -q "kernel: user fault page" $(BOOTLOG)
