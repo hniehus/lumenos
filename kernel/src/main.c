@@ -1663,8 +1663,8 @@ static const char *run_vmo_self_test(void) {
     capability_invalidate(&vmo_test_peer_cap);
     capability_invalidate(&vmo_test_wrong_type_cap);
     capability_invalidate(&vmo_test_cap);
-    capability_invalidate(&root_task_stack_cap);
-    capability_invalidate(&root_task_image_cap);
+    // Keep the seeded root-task capabilities valid; the self-test only owns the
+    // temporary test handles it created above.
 
     return 0;
 }
