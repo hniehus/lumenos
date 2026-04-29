@@ -13,9 +13,11 @@ timeout --foreground 20s qemu-system-x86_64 \
   -monitor none \
   -display none \
   -no-reboot 2>&1 | tee build/boot.log
-status=${PIPESTATUS[0]:-1}
-tee_status=${PIPESTATUS[1]:-0}
+pipeline_statuses=("${PIPESTATUS[@]}")
 set -e
+
+status=${pipeline_statuses[0]:-1}
+tee_status=${pipeline_statuses[1]:-0}
 
 if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
   exit "$status"
