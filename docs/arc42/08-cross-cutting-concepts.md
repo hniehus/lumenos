@@ -10,6 +10,9 @@ Expected characteristics:
 - constrained delegation
 - revocation model defined per object type
 - no hidden ambient access path where avoidable
+- rights are explicit bits, not implied by object reachability
+- delegation attenuates rights and never expands them
+- invalid capabilities, wrong object types, and insufficient rights fail deterministically
 
 ## 8.2 Object Ownership and Delegation
 

@@ -44,6 +44,13 @@
 #define VMO_RIGHT_EXECUTE (1ULL << 2)
 #define VMO_RIGHT_MAP (1ULL << 3)
 #define VMO_RIGHT_DUPLICATE (1ULL << 4)
+#define CAP_RIGHT_INSPECT (1ULL << 0)
+#define CAP_RIGHT_MAP (1ULL << 1)
+#define CAP_RIGHT_UNMAP (1ULL << 2)
+#define CAP_RIGHT_READ (1ULL << 3)
+#define CAP_RIGHT_WRITE (1ULL << 4)
+#define CAP_RIGHT_EXECUTE (1ULL << 5)
+#define CAP_RIGHT_DELEGATE (1ULL << 6)
 
 // PMM constants
 #define FRAME_SIZE PAGE_SIZE
@@ -196,6 +203,26 @@ enum user_mapping_access {
     USER_MAPPING_EXECUTABLE = 2,
 };
 
+enum capability_object_type {
+    CAP_OBJECT_INVALID = 0,
+    CAP_OBJECT_TASK = 1,
+    CAP_OBJECT_THREAD = 2,
+    CAP_OBJECT_ADDRESS_SPACE = 3,
+    CAP_OBJECT_VMO = 4,
+    CAP_OBJECT_CHANNEL = 5,
+    CAP_OBJECT_INTERRUPT = 6,
+    CAP_OBJECT_TIMER = 7,
+    CAP_OBJECT_DEVICE_HANDLE = 8,
+};
+
+enum capability_status {
+    CAP_STATUS_OK = 0,
+    CAP_STATUS_INVALID = 1,
+    CAP_STATUS_TYPE_MISMATCH = 2,
+    CAP_STATUS_OBJECT_MISMATCH = 3,
+    CAP_STATUS_RIGHTS_MISSING = 4,
+};
+
 struct vmo;
 
 struct vmo_mapping_record {
@@ -226,6 +253,16 @@ struct vmo {
     struct vmo_mapping_record mappings[VMO_MAX_MAPPINGS];
 };
 
+struct capability {
+    uint64_t id;
+    enum capability_object_type object_type;
+    void *object;
+    uint64_t rights_mask;
+    uint64_t parent_id;
+    int valid;
+    const char *name;
+};
+
 static struct address_space root_task_address_space = {
     .id = 1,
     .name = "root-task-as",
@@ -235,6 +272,14 @@ static struct vmo root_task_image_vmo;
 static struct vmo root_task_stack_vmo;
 static struct vmo vmo_test_vmo;
 static struct vmo vmo_test_peer_vmo;
+static struct capability root_task_image_cap;
+static struct capability root_task_stack_cap;
+static struct capability vmo_test_cap;
+static struct capability vmo_test_peer_cap;
+static struct capability vmo_test_ro_cap;
+static struct capability vmo_test_wrong_type_cap;
+static struct capability vmo_test_escalation_cap;
+static uint64_t next_capability_id = 1;
 
 static void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
@@ -401,6 +446,10 @@ static uint64_t vmo_allocate_id(void) {
     return next_vmo_id++;
 }
 
+static uint64_t capability_allocate_id(void) {
+    return next_capability_id++;
+}
+
 static int ranges_overlap(uint64_t left_base, uint64_t left_size, uint64_t right_base, uint64_t right_size) {
     uint64_t left_end = left_base + left_size;
     uint64_t right_end = right_base + right_size;
@@ -452,6 +501,57 @@ static void vmo_log_drop(const struct vmo *vmo) {
     serial_write_string("\n");
 }
 
+static const char *capability_object_type_name(enum capability_object_type object_type) {
+    switch (object_type) {
+        case CAP_OBJECT_INVALID:
+            return "invalid";
+        case CAP_OBJECT_TASK:
+            return "task";
+        case CAP_OBJECT_THREAD:
+            return "thread";
+        case CAP_OBJECT_ADDRESS_SPACE:
+            return "address-space";
+        case CAP_OBJECT_VMO:
+            return "vmo";
+        case CAP_OBJECT_CHANNEL:
+            return "channel";
+        case CAP_OBJECT_INTERRUPT:
+            return "interrupt";
+        case CAP_OBJECT_TIMER:
+            return "timer";
+        case CAP_OBJECT_DEVICE_HANDLE:
+            return "device-handle";
+    }
+
+    return "unknown";
+}
+
+static void capability_log_create(const struct capability *cap) {
+    serial_write_string("cap: create id=");
+    serial_write_decimal(cap->id);
+    serial_write_string(" type=");
+    serial_write_string(capability_object_type_name(cap->object_type));
+    serial_write_string(" rights=");
+    serial_write_hex(cap->rights_mask);
+    serial_write_string("\n");
+}
+
+static void capability_log_delegate(const struct capability *parent, const struct capability *child) {
+    serial_write_string("cap: delegate parent=");
+    serial_write_decimal(parent->id);
+    serial_write_string(" child=");
+    serial_write_decimal(child->id);
+    serial_write_string(" rights=");
+    serial_write_hex(child->rights_mask);
+    serial_write_string("\n");
+}
+
+static void capability_log_drop(const struct capability *cap) {
+    serial_write_string("cap: drop id=");
+    serial_write_decimal(cap->id);
+    serial_write_string("\n");
+}
+
 static void vmo_init(struct vmo *vmo, const char *name, uint8_t *backing, uint64_t size, uint64_t rights_mask) {
     memory_zero((uint8_t *)vmo, sizeof(*vmo));
     vmo->id = vmo_allocate_id();
@@ -462,6 +562,78 @@ static void vmo_init(struct vmo *vmo, const char *name, uint8_t *backing, uint64
     vmo->name = name;
     vmo->backing = backing;
     vmo_log_create(vmo);
+}
+
+static void capability_init(
+    struct capability *cap,
+    const char *name,
+    enum capability_object_type object_type,
+    void *object,
+    uint64_t rights_mask) {
+    memory_zero((uint8_t *)cap, sizeof(*cap));
+    cap->id = capability_allocate_id();
+    cap->object_type = object_type;
+    cap->object = object;
+    cap->rights_mask = rights_mask;
+    cap->parent_id = 0;
+    cap->valid = 1;
+    cap->name = name;
+    capability_log_create(cap);
+}
+
+static void capability_invalidate(struct capability *cap) {
+    if (cap == 0 || !cap->valid) {
+        return;
+    }
+
+    cap->valid = 0;
+    capability_log_drop(cap);
+}
+
+static enum capability_status capability_require(
+    const struct capability *cap,
+    enum capability_object_type object_type,
+    const void *object,
+    uint64_t required_rights) {
+    if (cap == 0 || !cap->valid) {
+        return CAP_STATUS_INVALID;
+    }
+
+    if (cap->object_type != object_type) {
+        return CAP_STATUS_TYPE_MISMATCH;
+    }
+
+    if (cap->object != object) {
+        return CAP_STATUS_OBJECT_MISMATCH;
+    }
+
+    if ((cap->rights_mask & required_rights) != required_rights) {
+        return CAP_STATUS_RIGHTS_MISSING;
+    }
+
+    return CAP_STATUS_OK;
+}
+
+static enum capability_status capability_delegate(
+    const struct capability *parent,
+    struct capability *child,
+    uint64_t requested_rights) {
+    if (parent == 0 || !parent->valid) {
+        return CAP_STATUS_INVALID;
+    }
+
+    if ((parent->rights_mask & CAP_RIGHT_DELEGATE) == 0) {
+        return CAP_STATUS_RIGHTS_MISSING;
+    }
+
+    if ((requested_rights & ~parent->rights_mask) != 0) {
+        return CAP_STATUS_RIGHTS_MISSING;
+    }
+
+    capability_init(child, parent->name, parent->object_type, parent->object, requested_rights);
+    child->parent_id = parent->id;
+    capability_log_delegate(parent, child);
+    return CAP_STATUS_OK;
 }
 
 static int address_space_has_overlap(const struct address_space *as, uint64_t vaddr, uint64_t size) {
@@ -1242,6 +1414,71 @@ static const char *vmo_unmap_range(
     return 0;
 }
 
+static const char *capability_status_name(enum capability_status status) {
+    switch (status) {
+        case CAP_STATUS_OK:
+            return "ok";
+        case CAP_STATUS_INVALID:
+            return "invalid";
+        case CAP_STATUS_TYPE_MISMATCH:
+            return "type-mismatch";
+        case CAP_STATUS_OBJECT_MISMATCH:
+            return "object-mismatch";
+        case CAP_STATUS_RIGHTS_MISSING:
+            return "rights-missing";
+    }
+
+    return "unknown";
+}
+
+static const char *capability_map_vmo_range(
+    const struct capability *cap,
+    struct vmo *vmo,
+    struct address_space *as,
+    uint64_t vaddr,
+    uint64_t size,
+    uint64_t offset,
+    enum user_mapping_access access) {
+    uint64_t required_rights = CAP_RIGHT_MAP;
+    enum capability_status status;
+
+    switch (access) {
+        case USER_MAPPING_READ_ONLY:
+            required_rights |= CAP_RIGHT_READ;
+            break;
+        case USER_MAPPING_READ_WRITE:
+            required_rights |= CAP_RIGHT_READ | CAP_RIGHT_WRITE;
+            break;
+        case USER_MAPPING_EXECUTABLE:
+            required_rights |= CAP_RIGHT_EXECUTE;
+            break;
+    }
+
+    status = capability_require(cap, CAP_OBJECT_VMO, vmo, required_rights);
+    if (status != CAP_STATUS_OK) {
+        return capability_status_name(status);
+    }
+
+    return vmo_map_range(vmo, as, vaddr, size, offset, access);
+}
+
+static const char *capability_unmap_vmo_range(
+    const struct capability *cap,
+    struct vmo *vmo,
+    struct address_space *as,
+    uint64_t vaddr,
+    uint64_t size,
+    uint64_t offset) {
+    enum capability_status status;
+
+    status = capability_require(cap, CAP_OBJECT_VMO, vmo, CAP_RIGHT_UNMAP);
+    if (status != CAP_STATUS_OK) {
+        return capability_status_name(status);
+    }
+
+    return vmo_unmap_range(vmo, as, vaddr, size, offset);
+}
+
 static const char *vmo_release(struct vmo *vmo) {
     if (vmo->refcount == 0) {
         return "vmo refcount underflow";
@@ -1281,8 +1518,13 @@ static const char *choose_vmo_self_test_vaddr(uint64_t *vaddr_out) {
 
 static const char *run_vmo_self_test(void) {
     const char *error;
+    enum capability_status cap_status;
+    uint64_t cycle;
     uint64_t self_test_vaddr = 0;
+    struct capability missing_cap;
 
+    serial_write_string("cap: self-test begin\n");
+    memory_zero((uint8_t *)&missing_cap, sizeof(missing_cap));
     memory_zero(vmo_test_pages, PAGE_SIZE);
     memory_zero(vmo_test_peer_pages, PAGE_SIZE);
     vmo_init(
@@ -1297,13 +1539,33 @@ static const char *run_vmo_self_test(void) {
         vmo_test_peer_pages,
         PAGE_SIZE,
         VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
+    capability_init(
+        &vmo_test_cap,
+        "self-test-vmo-cap",
+        CAP_OBJECT_VMO,
+        &vmo_test_vmo,
+        CAP_RIGHT_MAP | CAP_RIGHT_UNMAP | CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_DELEGATE);
+    capability_init(
+        &vmo_test_peer_cap,
+        "self-test-peer-vmo-cap",
+        CAP_OBJECT_VMO,
+        &vmo_test_peer_vmo,
+        CAP_RIGHT_MAP | CAP_RIGHT_UNMAP | CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_DELEGATE);
+    capability_init(
+        &vmo_test_wrong_type_cap,
+        "self-test-as-cap",
+        CAP_OBJECT_ADDRESS_SPACE,
+        &root_task_address_space,
+        CAP_RIGHT_MAP | CAP_RIGHT_UNMAP | CAP_RIGHT_INSPECT);
+    serial_write_string("cap: self-test caps ready\n");
 
     error = choose_vmo_self_test_vaddr(&self_test_vaddr);
     if (error != 0) {
         return error;
     }
 
-    error = vmo_map_range(
+    error = capability_map_vmo_range(
+        &vmo_test_cap,
         &vmo_test_vmo,
         &root_task_address_space,
         self_test_vaddr,
@@ -1314,7 +1576,61 @@ static const char *run_vmo_self_test(void) {
         return error;
     }
 
-    error = vmo_map_range(
+    cap_status = capability_require(&missing_cap, CAP_OBJECT_VMO, &vmo_test_vmo, CAP_RIGHT_READ);
+    if (cap_status != CAP_STATUS_INVALID) {
+        return "cap missing access failed";
+    }
+
+    serial_write_string("cap: invalid access code=");
+    serial_write_decimal((uint64_t)cap_status);
+    serial_write_string("\n");
+
+    cap_status = capability_require(&vmo_test_wrong_type_cap, CAP_OBJECT_VMO, &vmo_test_vmo, CAP_RIGHT_READ);
+    if (cap_status != CAP_STATUS_TYPE_MISMATCH) {
+        return "cap wrong type access failed";
+    }
+
+    serial_write_string("cap: wrong-type access code=");
+    serial_write_decimal((uint64_t)cap_status);
+    serial_write_string("\n");
+
+    cap_status = capability_delegate(&vmo_test_cap, &vmo_test_ro_cap, CAP_RIGHT_MAP | CAP_RIGHT_READ);
+    if (cap_status != CAP_STATUS_OK) {
+        return capability_status_name(cap_status);
+    }
+
+    cap_status = capability_require(&vmo_test_ro_cap, CAP_OBJECT_VMO, &vmo_test_vmo, CAP_RIGHT_WRITE);
+    if (cap_status != CAP_STATUS_RIGHTS_MISSING) {
+        return "cap insufficient rights access failed";
+    }
+
+    serial_write_string("cap: insufficient-rights access code=");
+    serial_write_decimal((uint64_t)cap_status);
+    serial_write_string("\n");
+
+    for (cycle = 0; cycle < 1000; ++cycle) {
+        cap_status = capability_delegate(&vmo_test_cap, &vmo_test_ro_cap, CAP_RIGHT_MAP | CAP_RIGHT_READ);
+        if (cap_status != CAP_STATUS_OK) {
+            return capability_status_name(cap_status);
+        }
+
+        if (vmo_test_ro_cap.rights_mask != (CAP_RIGHT_MAP | CAP_RIGHT_READ)) {
+            return "cap rights mismatch";
+        }
+
+        cap_status = capability_delegate(
+            &vmo_test_ro_cap,
+            &vmo_test_escalation_cap,
+            CAP_RIGHT_MAP | CAP_RIGHT_READ | CAP_RIGHT_WRITE);
+        if (cap_status != CAP_STATUS_RIGHTS_MISSING) {
+            return "cap escalation allowed";
+        }
+    }
+
+    serial_write_string("cap: attenuation cycles complete count=1000\n");
+
+    error = capability_map_vmo_range(
+        &vmo_test_peer_cap,
         &vmo_test_peer_vmo,
         &root_task_address_space,
         self_test_vaddr,
@@ -1327,7 +1643,7 @@ static const char *run_vmo_self_test(void) {
 
     serial_write_string("vmo: cross-vmo overlap rejected\n");
 
-    error = vmo_unmap_range(&vmo_test_vmo, &root_task_address_space, self_test_vaddr, PAGE_SIZE, 0);
+    error = capability_unmap_vmo_range(&vmo_test_cap, &vmo_test_vmo, &root_task_address_space, self_test_vaddr, PAGE_SIZE, 0);
     if (error != 0) {
         return error;
     }
@@ -1341,6 +1657,14 @@ static const char *run_vmo_self_test(void) {
     if (error != 0) {
         return error;
     }
+
+    capability_invalidate(&vmo_test_escalation_cap);
+    capability_invalidate(&vmo_test_ro_cap);
+    capability_invalidate(&vmo_test_peer_cap);
+    capability_invalidate(&vmo_test_wrong_type_cap);
+    capability_invalidate(&vmo_test_cap);
+    capability_invalidate(&root_task_stack_cap);
+    capability_invalidate(&root_task_image_cap);
 
     return 0;
 }
@@ -1519,6 +1843,12 @@ static const char *prepare_root_task_launch_state(uint64_t entry, uint64_t *rsp_
         root_task_stack_pages,
         USER_STACK_SIZE,
         VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_MAP);
+    capability_init(
+        &root_task_stack_cap,
+        "root-task-stack-cap",
+        CAP_OBJECT_VMO,
+        &root_task_stack_vmo,
+        CAP_RIGHT_MAP | CAP_RIGHT_UNMAP | CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_DELEGATE);
     root_task_launch_state.stack_guard_base = stack_guard_base;
     root_task_launch_state.stack_base = stack_base;
     root_task_launch_state.stack_top = USER_STACK_TOP;
@@ -1558,6 +1888,12 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
         root_task_image_pages,
         ROOT_TASK_IMAGE_CAPACITY,
         VMO_RIGHT_READ | VMO_RIGHT_WRITE | VMO_RIGHT_EXECUTE | VMO_RIGHT_MAP | VMO_RIGHT_DUPLICATE);
+    capability_init(
+        &root_task_image_cap,
+        "root-task-image-cap",
+        CAP_OBJECT_VMO,
+        &root_task_image_vmo,
+        CAP_RIGHT_MAP | CAP_RIGHT_UNMAP | CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXECUTE | CAP_RIGHT_DELEGATE);
 
     for (index = 0; index < ehdr->e_phnum; ++index) {
         const struct elf64_phdr *phdr = &phdrs[index];
@@ -1598,7 +1934,8 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
         serial_write_string(user_mapping_access_name(access));
         serial_write_string("\n");
 
-        error = vmo_map_range(
+        error = capability_map_vmo_range(
+            &root_task_image_cap,
             &root_task_image_vmo,
             &root_task_address_space,
             segment_vaddr,
@@ -1614,7 +1951,8 @@ static const char *install_root_task_user_mappings(const struct limine_file *mod
         return "user stack vaddr bad";
     }
 
-    error = vmo_map_range(
+    error = capability_map_vmo_range(
+        &root_task_stack_cap,
         &root_task_stack_vmo,
         &root_task_address_space,
         root_task_launch_state.stack_base,
