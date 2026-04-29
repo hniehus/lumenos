@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '0 0 * * *'
 
 jobs:
   build:
@@ -20,3 +22,20 @@ jobs:
         run: |
           echo "TODO: add actual build steps"
           echo "CI scaffold is working."
+
+  nightly-build:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (minimal)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential clang llvm lld nasm qemu-system-x86 ovmf make
+
+      - name: Nightly build
+        run: |
+          make clean
+          make image
