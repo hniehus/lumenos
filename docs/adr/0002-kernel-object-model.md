@@ -54,6 +54,8 @@ These are the minimal kernel objects for the first architecture baseline.
 5. Delegation semantics **MUST** be defined before broader subsystem growth builds on top of the object.
 6. Revocation semantics **MUST** be considered part of the object contract, even if the first implementation is minimal.
 7. The set of kernel objects **MUST NOT** grow casually; new object types require an ADR.
+8. Capability rights **MUST** be represented as explicit bits, and delegation **MUST NOT** increase those rights.
+9. Invalid capabilities, wrong object types, and insufficient rights **MUST** fail deterministically.
 
 ## Required lifecycle concerns per object
 
@@ -76,6 +78,17 @@ The following relationships define the first architectural shape:
 - A **Channel / Endpoint** enables controlled IPC between principals
 - An **Interrupt** and **Timer** are first-class kernel event objects, not hidden side paths
 - A **DeviceHandle** represents controlled device-facing authority rather than unrestricted access
+
+## Capability semantics
+
+Capabilities are valid only when all of the following remain true:
+
+- the capability itself is valid
+- the referenced object type matches the requested operation
+- the referenced object identity matches the target of the operation
+- the granted rights mask contains every bit required for the operation
+
+Delegation is an attenuation step. A delegated capability may preserve or reduce rights, but it may not add rights that were not already present in the parent capability.
 
 ## Initial invariants
 

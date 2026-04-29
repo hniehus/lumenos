@@ -261,6 +261,26 @@ struct lumen_boot_cap_entry {
 
 The capability descriptor table documents what the kernel has already installed into the initial handle table.
 
+Capability rights are encoded as explicit bits in the `rights_mask` field:
+
+```c
+enum lumen_cap_right {
+    LUMEN_CAP_RIGHT_INSPECT = 1ULL << 0,
+    LUMEN_CAP_RIGHT_MAP = 1ULL << 1,
+    LUMEN_CAP_RIGHT_UNMAP = 1ULL << 2,
+    LUMEN_CAP_RIGHT_READ = 1ULL << 3,
+    LUMEN_CAP_RIGHT_WRITE = 1ULL << 4,
+    LUMEN_CAP_RIGHT_EXECUTE = 1ULL << 5,
+    LUMEN_CAP_RIGHT_DELEGATE = 1ULL << 6,
+};
+```
+
+Delegation is attenuation only:
+
+- a delegated capability may preserve or reduce rights
+- delegation must never add rights that were not present in the parent capability
+- invalid capabilities, wrong object types, and insufficient rights must fail deterministically
+
 ---
 
 ## 8. Initial Capability Model
