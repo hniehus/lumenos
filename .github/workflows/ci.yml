@@ -8,34 +8,95 @@ on:
 
 jobs:
   build:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install deps (minimal)
+      - name: Install deps
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential clang llvm lld nasm qemu-system-x86 ovmf make
+          sudo apt-get install -y \
+            xorriso \
+            build-essential \
+            clang \
+            llvm \
+            lld \
+            nasm \
+            qemu-system-x86 \
+            ovmf \
+            make
 
-      - name: Build (placeholder)
+      - name: Verify Limine binary release payload
         run: |
-          echo "TODO: add actual build steps"
-          echo "CI scaffold is working."
+          test -d third_party/limine
+          test -f third_party/limine/limine
+          test -f third_party/limine/limine-bios.sys
+          test -f third_party/limine/limine-bios-cd.bin
+          test -f third_party/limine/limine-uefi-cd.bin
+          test -f third_party/limine/BOOTX64.EFI
+          ls -la third_party/limine
+
+      - name: Build image
+        run: |
+          make clean
+          make image
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumenos-iso
+          path: build/lumenos.iso
+          if-no-files-found: error
 
   nightly-build:
-    runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install deps (minimal)
+      - name: Install deps
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y xorriso build-essential clang llvm lld nasm qemu-system-x86 ovmf make
+          sudo apt-get install -y \
+            xorriso \
+            build-essential \
+            clang \
+            llvm \
+            lld \
+            nasm \
+            qemu-system-x86 \
+            ovmf \
+            make
+
+      - name: Verify Limine binary release payload
+        run: |
+          test -d third_party/limine
+          test -f third_party/limine/limine
+          test -f third_party/limine/limine-bios.sys
+          test -f third_party/limine/limine-bios-cd.bin
+          test -f third_party/limine/limine-uefi-cd.bin
+          test -f third_party/limine/BOOTX64.EFI
+          ls -la third_party/limine
 
       - name: Nightly build
         run: |
           make clean
           make image
+
+      - name: Upload nightly ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumenos-iso-nightly
+          path: build/lumenos.iso
+          if-no-files-found: error

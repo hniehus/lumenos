@@ -13,6 +13,8 @@ FAULT_ADDR ?= 0xffffffff80000000
 
 include version/version.mk
 
+# Variant A:
+# third_party/limine is expected to be a COMPLETE Limine binary release directory.
 LIMINE_DIR := third_party/limine
 LIMINE := $(LIMINE_DIR)/limine
 LIMINE_BIOS_SYS := $(LIMINE_DIR)/limine-bios.sys
@@ -20,7 +22,7 @@ LIMINE_BIOS_CD := $(LIMINE_DIR)/limine-bios-cd.bin
 LIMINE_UEFI_CD := $(LIMINE_DIR)/limine-uefi-cd.bin
 LIMINE_EFI := $(LIMINE_DIR)/BOOTX64.EFI
 
-.PHONY: all kernel root-task version print-version iso-root image run smoke clean FORCE
+.PHONY: all kernel root-task version print-version iso-root image run smoke smoke-guard clean FORCE check-limine
 
 all: image
 
@@ -29,6 +31,14 @@ kernel: FORCE $(KERNEL)
 root-task: $(ROOT_TASK)
 
 FORCE:
+
+check-limine:
+	@test -d $(LIMINE_DIR) || (echo "error: $(LIMINE_DIR) not found" >&2; exit 1)
+	@test -f $(LIMINE) || (echo "error: missing $(LIMINE)" >&2; exit 1)
+	@test -f $(LIMINE_BIOS_SYS) || (echo "error: missing $(LIMINE_BIOS_SYS)" >&2; exit 1)
+	@test -f $(LIMINE_BIOS_CD) || (echo "error: missing $(LIMINE_BIOS_CD)" >&2; exit 1)
+	@test -f $(LIMINE_UEFI_CD) || (echo "error: missing $(LIMINE_UEFI_CD)" >&2; exit 1)
+	@test -f $(LIMINE_EFI) || (echo "error: missing $(LIMINE_EFI)" >&2; exit 1)
 
 $(KERNEL_VERSION_H) $(KERNEL_VERSION_TXT): FORCE version/version.mk version/build.counter scripts/generate-kernel-version.sh
 	@mkdir -p $(BUILD_DIR) $(GENERATED_DIR)
@@ -39,6 +49,7 @@ $(KERNEL_VERSION_H) $(KERNEL_VERSION_TXT): FORCE version/version.mk version/buil
 		$(KERNEL_VERSION_TXT)
 
 $(KERNEL): kernel/src/main.c kernel/include/limine.h kernel/linker.ld $(KERNEL_VERSION_H)
+	@mkdir -p $(BUILD_DIR)
 	clang kernel/src/main.c \
 		-std=c23 \
 		-ffreestanding \
@@ -87,7 +98,7 @@ $(ROOT_TASK): FORCE root-task/src/main.c
 		-Wl,--build-id=none \
 		-o $(ROOT_TASK)
 
-iso-root: kernel root-task
+iso-root: kernel root-task check-limine
 	@rm -rf $(ISO_ROOT)
 	@mkdir -p $(ISO_ROOT)/boot
 	@mkdir -p $(ISO_ROOT)/boot/limine
@@ -111,6 +122,7 @@ print-version:
 	printf '%s\n' "$$MAJOR.$$MINOR.$$PATCH:$$next"
 
 image: iso-root
+	@mkdir -p $(BUILD_DIR)
 	xorriso -as mkisofs -R -r -J \
 		-b limine-bios-cd.bin \
 		-no-emul-boot \
