@@ -20,7 +20,14 @@ LIMINE_BIOS_CD := $(LIMINE_DIR)/limine-bios-cd.bin
 LIMINE_UEFI_CD := $(LIMINE_DIR)/limine-uefi-cd.bin
 LIMINE_EFI := $(LIMINE_DIR)/BOOTX64.EFI
 
-.PHONY: all kernel root-task version print-version iso-root image run smoke clean FORCE
+LIMINE_ARTIFACTS := \
+	$(LIMINE) \
+	$(LIMINE_BIOS_SYS) \
+	$(LIMINE_BIOS_CD) \
+	$(LIMINE_UEFI_CD) \
+	$(LIMINE_EFI)
+
+.PHONY: all kernel root-task version print-version iso-root image run smoke smoke-guard clean FORCE limine check-limine-dir
 
 all: image
 
@@ -28,7 +35,15 @@ kernel: FORCE $(KERNEL)
 
 root-task: $(ROOT_TASK)
 
+limine: $(LIMINE_ARTIFACTS)
+
 FORCE:
+
+check-limine-dir:
+	@test -d $(LIMINE_DIR) || (echo "error: $(LIMINE_DIR) not found. Did you forget to checkout submodules?" >&2; exit 1)
+
+$(LIMINE) $(LIMINE_BIOS_SYS) $(LIMINE_BIOS_CD) $(LIMINE_UEFI_CD) $(LIMINE_EFI): check-limine-dir
+	$(MAKE) -C $(LIMINE_DIR)
 
 $(KERNEL_VERSION_H) $(KERNEL_VERSION_TXT): FORCE version/version.mk version/build.counter scripts/generate-kernel-version.sh
 	@mkdir -p $(BUILD_DIR) $(GENERATED_DIR)
@@ -39,6 +54,7 @@ $(KERNEL_VERSION_H) $(KERNEL_VERSION_TXT): FORCE version/version.mk version/buil
 		$(KERNEL_VERSION_TXT)
 
 $(KERNEL): kernel/src/main.c kernel/include/limine.h kernel/linker.ld $(KERNEL_VERSION_H)
+	@mkdir -p $(BUILD_DIR)
 	clang kernel/src/main.c \
 		-std=c23 \
 		-ffreestanding \
@@ -87,7 +103,7 @@ $(ROOT_TASK): FORCE root-task/src/main.c
 		-Wl,--build-id=none \
 		-o $(ROOT_TASK)
 
-iso-root: kernel root-task
+iso-root: kernel root-task limine
 	@rm -rf $(ISO_ROOT)
 	@mkdir -p $(ISO_ROOT)/boot
 	@mkdir -p $(ISO_ROOT)/boot/limine
@@ -111,6 +127,7 @@ print-version:
 	printf '%s\n' "$$MAJOR.$$MINOR.$$PATCH:$$next"
 
 image: iso-root
+	@mkdir -p $(BUILD_DIR)
 	xorriso -as mkisofs -R -r -J \
 		-b limine-bios-cd.bin \
 		-no-emul-boot \

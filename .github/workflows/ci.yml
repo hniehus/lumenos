@@ -8,34 +8,87 @@ on:
 
 jobs:
   build:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install deps (minimal)
+      - name: Install deps
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential clang llvm lld nasm qemu-system-x86 ovmf make
+          sudo apt-get install -y \
+            xorriso \
+            build-essential \
+            clang \
+            llvm \
+            lld \
+            nasm \
+            qemu-system-x86 \
+            ovmf \
+            make
 
-      - name: Build (placeholder)
+      - name: Debug Limine checkout
         run: |
-          echo "TODO: add actual build steps"
-          echo "CI scaffold is working."
+          git submodule status --recursive || true
+          ls -la third_party || true
+          ls -la third_party/limine || true
+
+      - name: Build image
+        run: |
+          make clean
+          make image
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumenos-iso
+          path: build/lumenos.iso
+          if-no-files-found: error
 
   nightly-build:
-    runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install deps (minimal)
+      - name: Install deps
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y xorriso build-essential clang llvm lld nasm qemu-system-x86 ovmf make
+          sudo apt-get install -y \
+            xorriso \
+            build-essential \
+            clang \
+            llvm \
+            lld \
+            nasm \
+            qemu-system-x86 \
+            ovmf \
+            make
+
+      - name: Debug Limine checkout
+        run: |
+          git submodule status --recursive || true
+          ls -la third_party || true
+          ls -la third_party/limine || true
 
       - name: Nightly build
         run: |
           make clean
           make image
+
+      - name: Upload nightly ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumenos-iso-nightly
+          path: build/lumenos.iso
+          if-no-files-found: error
