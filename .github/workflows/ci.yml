@@ -32,11 +32,15 @@ jobs:
             ovmf \
             make
 
-      - name: Debug Limine checkout
+      - name: Verify Limine binary release payload
         run: |
-          git submodule status --recursive || true
-          ls -la third_party || true
-          ls -la third_party/limine || true
+          test -d third_party/limine
+          test -f third_party/limine/limine
+          test -f third_party/limine/limine-bios.sys
+          test -f third_party/limine/limine-bios-cd.bin
+          test -f third_party/limine/limine-uefi-cd.bin
+          test -f third_party/limine/BOOTX64.EFI
+          ls -la third_party/limine
 
       - name: Build image
         run: |
@@ -75,11 +79,15 @@ jobs:
             ovmf \
             make
 
-      - name: Debug Limine checkout
+      - name: Verify Limine binary release payload
         run: |
-          git submodule status --recursive || true
-          ls -la third_party || true
-          ls -la third_party/limine || true
+          test -d third_party/limine
+          test -f third_party/limine/limine
+          test -f third_party/limine/limine-bios.sys
+          test -f third_party/limine/limine-bios-cd.bin
+          test -f third_party/limine/limine-uefi-cd.bin
+          test -f third_party/limine/BOOTX64.EFI
+          ls -la third_party/limine
 
       - name: Nightly build
         run: |
