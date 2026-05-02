@@ -13,6 +13,8 @@ FAULT_ADDR ?= 0xffffffff80000000
 
 include version/version.mk
 
+# Variant A:
+# third_party/limine is expected to be a COMPLETE Limine binary release directory.
 LIMINE_DIR := third_party/limine
 LIMINE := $(LIMINE_DIR)/limine
 LIMINE_BIOS_SYS := $(LIMINE_DIR)/limine-bios.sys
@@ -20,14 +22,7 @@ LIMINE_BIOS_CD := $(LIMINE_DIR)/limine-bios-cd.bin
 LIMINE_UEFI_CD := $(LIMINE_DIR)/limine-uefi-cd.bin
 LIMINE_EFI := $(LIMINE_DIR)/BOOTX64.EFI
 
-LIMINE_ARTIFACTS := \
-	$(LIMINE) \
-	$(LIMINE_BIOS_SYS) \
-	$(LIMINE_BIOS_CD) \
-	$(LIMINE_UEFI_CD) \
-	$(LIMINE_EFI)
-
-.PHONY: all kernel root-task version print-version iso-root image run smoke smoke-guard clean FORCE limine check-limine-dir
+.PHONY: all kernel root-task version print-version iso-root image run smoke smoke-guard clean FORCE check-limine
 
 all: image
 
@@ -35,15 +30,15 @@ kernel: FORCE $(KERNEL)
 
 root-task: $(ROOT_TASK)
 
-limine: $(LIMINE_ARTIFACTS)
-
 FORCE:
 
-check-limine-dir:
-	@test -d $(LIMINE_DIR) || (echo "error: $(LIMINE_DIR) not found. Did you forget to checkout submodules?" >&2; exit 1)
-
-$(LIMINE) $(LIMINE_BIOS_SYS) $(LIMINE_BIOS_CD) $(LIMINE_UEFI_CD) $(LIMINE_EFI): check-limine-dir
-	$(MAKE) -C $(LIMINE_DIR)
+check-limine:
+	@test -d $(LIMINE_DIR) || (echo "error: $(LIMINE_DIR) not found" >&2; exit 1)
+	@test -f $(LIMINE) || (echo "error: missing $(LIMINE)" >&2; exit 1)
+	@test -f $(LIMINE_BIOS_SYS) || (echo "error: missing $(LIMINE_BIOS_SYS)" >&2; exit 1)
+	@test -f $(LIMINE_BIOS_CD) || (echo "error: missing $(LIMINE_BIOS_CD)" >&2; exit 1)
+	@test -f $(LIMINE_UEFI_CD) || (echo "error: missing $(LIMINE_UEFI_CD)" >&2; exit 1)
+	@test -f $(LIMINE_EFI) || (echo "error: missing $(LIMINE_EFI)" >&2; exit 1)
 
 $(KERNEL_VERSION_H) $(KERNEL_VERSION_TXT): FORCE version/version.mk version/build.counter scripts/generate-kernel-version.sh
 	@mkdir -p $(BUILD_DIR) $(GENERATED_DIR)
@@ -103,7 +98,7 @@ $(ROOT_TASK): FORCE root-task/src/main.c
 		-Wl,--build-id=none \
 		-o $(ROOT_TASK)
 
-iso-root: kernel root-task limine
+iso-root: kernel root-task check-limine
 	@rm -rf $(ISO_ROOT)
 	@mkdir -p $(ISO_ROOT)/boot
 	@mkdir -p $(ISO_ROOT)/boot/limine
