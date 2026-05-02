@@ -11,6 +11,10 @@
 *.iso
 *.log
 
+# exceptions for Limine
+!third_party/limine/
+!third_party/limine/**
+
 # Editors / OS
 .vscode/
 .idea/
